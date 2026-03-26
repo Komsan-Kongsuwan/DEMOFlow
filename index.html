@@ -623,11 +623,12 @@ const XLSX = (function () {
         <input type="file" id="fileInput" accept=".xlsx,.xls">
         📂 Load Excel File
       </label>
-      <label class="upload-btn" style="margin-top:8px;" title="Upload PDF reference documents linked in your flowchart">
+      <label class="upload-btn" id="pdfUploadLabel" style="margin-top:8px;" title="Upload PDF reference documents linked in your flowchart">
         <input type="file" id="pdfInput" accept=".pdf" multiple>
         📄 Upload Reference PDF
       </label>
       <div id="pdf-list"></div>
+      <div id="pdf-upload-msg" style="display:none;font-size:11px;color:#f59e0b;padding:4px 2px;line-height:1.4;"></div>
     </div>
     <div class="sidebar-section-label">Work Topics</div>
     <nav id="topicList">
@@ -1569,14 +1570,34 @@ function renderPdfList() {
 function openLink(link) {
   if (!link) return;
   const url = link.trim();
-  // Extract filename from any path (Windows backslash or forward slash)
-  const filename = url.split(/[/\\]/).pop().toLowerCase();
-  // 1. Check in-memory store — works on any platform including file://
-  if (pdfStore[filename]) { window.open(pdfStore[filename], '_blank'); return; }
-  // 2. Direct URL
-  if (/^https?:\/\//i.test(url)) { window.open(url, '_blank'); return; }
-  // 3. Relative path (same folder as index.html — works on servers)
-  window.open(url.replace(/\\/g, '/'), '_blank');
+
+  // Extract just the filename from any path style
+  const filename = url.split(/[\/\\]/).pop().toLowerCase();
+
+  // 1. Check in-memory PDF store (user uploaded via sidebar)
+  if (pdfStore[filename]) {
+    window.open(pdfStore[filename], '_blank');
+    return;
+  }
+
+  // 2. Direct http/https URL — open immediately
+  if (/^https?:\/\//i.test(url)) {
+    window.open(url, '_blank');
+    return;
+  }
+
+  // 3. Local / Windows path — cannot open directly from browser
+  // Show a friendly prompt asking user to upload the file
+  const msg = document.getElementById('pdf-upload-msg');
+  if (msg) {
+    msg.textContent = '⬆ Please upload "' + filename + '" using the button above.';
+    msg.style.display = 'block';
+    // Highlight the upload button
+    const btn = document.getElementById('pdfUploadLabel');
+    if (btn) { btn.style.borderColor = '#f59e0b'; btn.style.color = '#f59e0b';
+      setTimeout(() => { btn.style.borderColor = ''; btn.style.color = ''; }, 3000); }
+    setTimeout(() => { msg.style.display = 'none'; }, 5000);
+  }
 }
 
 /* ═══════════════════════════════════════════════════════
