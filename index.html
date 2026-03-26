@@ -1153,41 +1153,33 @@ function buildNode(node) {
   });
   g.appendChild(lbl);
 
-  // Link badge — 📝 at bottom-right corner if node has a link
+  // 📝 Link badge — bottom-right corner, calls openLink() (uses pdfStore)
   if (node.link) {
-    const bx = x + NW - 18;
-    const by = y + NH - 18;
-    // Circle background
+    const bx = x + NW - 18, by = y + NH - 18;
     g.appendChild(svgEl('circle', {
-      cx: bx + 9, cy: by + 9, r: 11,
+      cx: bx+9, cy: by+9, r: 11,
       fill: '#f59e0b', opacity: '0.92',
       filter: 'drop-shadow(1px 2px 3px rgba(0,0,0,0.35))'
     }));
-    // 📝 emoji text
     const linkIcon = svgEl('text', {
-      x: bx + 9, y: by + 14,
-      'text-anchor': 'middle', 'font-size': '12',
+      x: bx+9, y: by+14, 'text-anchor': 'middle', 'font-size': '12',
       'font-family': 'Segoe UI Emoji, Arial, sans-serif',
       style: 'cursor:pointer; user-select:none;'
     });
     linkIcon.textContent = '📝';
-    linkIcon.addEventListener('click', (e) => {
-      e.stopPropagation();
-      window.open(node.link, '_blank');
-    });
-    // Invisible larger hit area
     const hitArea = svgEl('circle', {
-      cx: bx + 9, cy: by + 9, r: 14,
+      cx: bx+9, cy: by+9, r: 14,
       fill: 'transparent', style: 'cursor:pointer;'
     });
-    hitArea.addEventListener('click', (e) => {
-      e.stopPropagation();
-      window.open(node.link, '_blank');
-    });
-    hitArea.setAttribute('title', node.link);
+    hitArea.setAttribute('title', '📄 ' + node.link.split(/[\/\\]/).pop());
+    [linkIcon, hitArea].forEach(el => el.addEventListener('click', ev => {
+      ev.stopPropagation();
+      openLink(node.link);
+    }));
     g.appendChild(linkIcon);
     g.appendChild(hitArea);
   }
+
 
   return g;
 }
@@ -1484,7 +1476,7 @@ function showDetailPanel(node) {
         ${node.role ? `<div class="meta-chip">👤 ${escHtml(node.role)}</div>` : ''}
         ${node.notes ? `<div class="meta-chip">📝 ${escHtml(node.notes)}</div>` : ''}
         ${node.link  ? `<div class="meta-chip" style="cursor:pointer;color:var(--accent)" onclick="openLink('${escHtml(node.link)}')">🔗 Open Document</div>` : ''}
-        ${node.link  ? `<div class="meta-chip" style="cursor:pointer" onclick="window.open(node.link,'_blank')">🔗 Open Document</div>` : ''}
+        ${node.link  ? `<div class="meta-chip" style="cursor:pointer" onclick="openLink(node.link)">🔗 Open Document</div>` : ''}
       </div>
     </div>`;
 }
