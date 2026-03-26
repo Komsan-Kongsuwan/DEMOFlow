@@ -1,0 +1,1587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DemoFlow — Work Process Viewer</title>
+
+
+<script>
+/* ================================================================
+   INLINE XLSX  — pure JS, zero CDN, zero async, works on file://
+   Uses pako-style inflate (bounds-checked, no infinite loop)
+   API: XLSX.read(uint8array) → {SheetNames, Sheets}
+        XLSX.utils.sheet_to_json(sheet, {header:1, defval:null})
+   ================================================================ */
+const XLSX = (function () {
+
+  /* ── Inflate (RFC 1951) — fully bounds-checked ─────────────── */
+  function inflate(src) {
+    const I32 = Int32Array, U8 = Uint8Array;
+    let ip = 0, bitbuf = 0, bitcnt = 0;
+    let out = new U8(src.length * 4 + 256), op = 0;
+
+    function grow(n) {
+      if (op + n <= out.length) return;
+      const b = new U8(Math.max(out.length * 2, op + n));
+      b.set(out); out = b;
+    }
+
+    function bits(n) {
+      while (bitcnt < n) {
+        bitbuf |= (ip < src.length ? src[ip++] : 0) << bitcnt;
+        bitcnt += 8;
+      }
+      const v = bitbuf & ((1 << n) - 1);
+      bitbuf >>>= n; bitcnt -= n;
+      return v;
+    }
+
+    function makeTree(lens) {
+      const maxBits = Math.max(...lens, 1);
+      const bl_count = new I32(maxBits + 1);
+      for (const l of lens) if (l) bl_count[l]++;
+      const next_code = new I32(maxBits + 1);
+      for (let b = 1; b <= maxBits; b++)
+        next_code[b] = (next_code[b-1] + bl_count[b-1]) << 1;
+      const sym2code = [], sym2len = [];
+      for (let s = 0; s < lens.length; s++) {
+        if (lens[s]) { sym2code[s] = next_code[lens[s]]++; sym2len[s] = lens[s]; }
+      }
+      // Build decode table (reverse lookup: bitstring → symbol)
+      const tsize = 1 << maxBits;
+      const tbl = new I32(tsize).fill(-1);
+      for (let s = 0; s < lens.length; s++) {
+        if (!lens[s]) continue;
+        let code = sym2code[s], len = lens[s];
+        // reverse the code bits
+        let rev = 0;
+        for (let i = 0; i < len; i++) { rev = (rev << 1) | (code & 1); code >>= 1; }
+        const spread = 1 << (maxBits - len);
+        for (let i = 0; i < spread; i++) tbl[rev | (i << len)] = s;
+      }
+      return { tbl, maxBits, lens };
+    }
+
+    function decode(tree) {
+      while (bitcnt < tree.maxBits) {
+        bitbuf |= (ip < src.length ? src[ip++] : 0) << bitcnt;
+        bitcnt += 8;
+      }
+      const sym = tree.tbl[bitbuf & ((1 << tree.maxBits) - 1)];
+      if (sym < 0) throw new Error('inflate: bad symbol');
+      const len = tree.lens[sym];
+      bitbuf >>>= len; bitcnt -= len;
+      return sym;
+    }
+
+    // Length/distance tables
+    const LEXT = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+    const LBASE= [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+    const DEXT = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+    const DBASE= [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+
+    function fixedTrees() {
+      const ll = new Array(288);
+      for (let i=0;i<144;i++) ll[i]=8; for (let i=144;i<256;i++) ll[i]=9;
+      for (let i=256;i<280;i++) ll[i]=7; for (let i=280;i<288;i++) ll[i]=8;
+      return { ll: makeTree(ll), dd: makeTree(new Array(32).fill(5)) };
+    }
+
+    function block(ll, dd) {
+      for (;;) {
+        const sym = decode(ll);
+        if (sym < 256) { grow(1); out[op++] = sym; }
+        else if (sym === 256) break;
+        else {
+          const li = sym - 257;
+          const len  = LBASE[li]  + bits(LEXT[li]);
+          const di   = decode(dd);
+          const dist = DBASE[di]  + bits(DEXT[di]);
+          grow(len);
+          for (let i = 0; i < len; i++) { out[op] = out[op - dist]; op++; }
+        }
+      }
+    }
+
+    for (;;) {
+      const bfinal = bits(1), btype = bits(2);
+      if (btype === 0) {
+        bitbuf = 0; bitcnt = 0;
+        const len = src[ip] | (src[ip+1] << 8); ip += 4;
+        grow(len);
+        out.set(src.subarray(ip, ip + len), op); ip += len; op += len;
+      } else if (btype === 1) {
+        const { ll, dd } = fixedTrees();
+        block(ll, dd);
+      } else if (btype === 2) {
+        const hlit  = bits(5) + 257, hdist = bits(5) + 1, hclen = bits(4) + 4;
+        const CLO   = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+        const clens = new Array(19).fill(0);
+        for (let i = 0; i < hclen; i++) clens[CLO[i]] = bits(3);
+        const cl = makeTree(clens);
+        const all = [];
+        while (all.length < hlit + hdist) {
+          const s = decode(cl);
+          if (s < 16)      all.push(s);
+          else if (s === 16) { const c = bits(2)+3; for(let i=0;i<c;i++) all.push(all[all.length-1]||0); }
+          else if (s === 17) { const c = bits(3)+3; for(let i=0;i<c;i++) all.push(0); }
+          else               { const c = bits(7)+11; for(let i=0;i<c;i++) all.push(0); }
+        }
+        block(makeTree(all.slice(0,hlit)), makeTree(all.slice(hlit)));
+      } else throw new Error('inflate: bad btype');
+      if (bfinal) break;
+    }
+    return out.subarray(0, op);
+  }
+
+  /* ── ZIP reader ─────────────────────────────────────────────── */
+  function unzip(u8) {
+    const dv  = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const dec = new TextDecoder();
+    let eocd  = -1;
+    for (let i = u8.length - 22; i >= 0; i--)
+      if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error('Not a ZIP');
+    const cdCount  = dv.getUint16(eocd + 8,  true);
+    const cdOffset = dv.getUint32(eocd + 16, true);
+    const files = {}; let p = cdOffset;
+    for (let i = 0; i < cdCount; i++) {
+      if (dv.getUint32(p, true) !== 0x02014b50) break;
+      const method  = dv.getUint16(p + 10, true);
+      const compSz  = dv.getUint32(p + 20, true);
+      const fnLen   = dv.getUint16(p + 28, true);
+      const extLen  = dv.getUint16(p + 30, true);
+      const cmLen   = dv.getUint16(p + 32, true);
+      const lfhOff  = dv.getUint32(p + 42, true);
+      const fname   = dec.decode(u8.subarray(p + 46, p + 46 + fnLen));
+      p += 46 + fnLen + extLen + cmLen;
+      if (fname.endsWith('/')) continue;
+      const lfnLen  = dv.getUint16(lfhOff + 26, true);
+      const lexLen  = dv.getUint16(lfhOff + 28, true);
+      const dataOff = lfhOff + 30 + lfnLen + lexLen;
+      const comp    = u8.subarray(dataOff, dataOff + compSz);
+      files[fname]  = method === 8 ? inflate(comp) : method === 0 ? comp.slice() : null;
+    }
+    return files;
+  }
+
+  /* ── XLSX parser ─────────────────────────────────────────────── */
+  const tdec  = new TextDecoder();
+  const xp    = s => new DOMParser().parseFromString(s, 'text/xml');
+  function colIdx(c) { let n=0; for(const ch of c) n=n*26+ch.charCodeAt(0)-64; return n-1; }
+  function cellRC(r) { const m=r&&r.match(/^([A-Z]+)(\d+)$/); return m?{c:colIdx(m[1]),r:parseInt(m[2])-1}:null; }
+
+  function parseXLSX(files) {
+    const ss = [];
+    const ssp = Object.keys(files).find(k => k.toLowerCase().includes('sharedstrings'));
+    if (ssp && files[ssp]) {
+      xp(tdec.decode(files[ssp])).querySelectorAll('si').forEach(si =>
+        ss.push([...si.querySelectorAll('t')].map(t => t.textContent).join('')));
+    }
+    const wbDoc  = xp(tdec.decode(files['xl/workbook.xml']));
+    const relDoc = xp(tdec.decode(files['xl/_rels/workbook.xml.rels']));
+    const relMap = {};
+    relDoc.querySelectorAll('Relationship').forEach(r => relMap[r.getAttribute('Id')] = r.getAttribute('Target'));
+    const SheetNames = [], Sheets = {};
+    wbDoc.querySelectorAll('sheet').forEach(se => {
+      const name   = se.getAttribute('name');
+      const rid    = se.getAttribute('r:id');
+      const target = relMap[rid] || '';
+      const path   = target.startsWith('/') ? target.slice(1) : 'xl/' + target.replace(/^\.\.\//, '');
+      const raw    = files[path]; if (!raw) return;
+      SheetNames.push(name);
+      const sheet  = {};
+      xp(tdec.decode(raw)).querySelectorAll('c').forEach(cell => {
+        const r = cell.getAttribute('r'), t = cell.getAttribute('t');
+        const vEl = cell.querySelector('v'), iEl = cell.querySelector('is t');
+        if (!r) return;
+        let val = null;
+        if (t==='s'&&vEl)        val = ss[parseInt(vEl.textContent)] ?? '';
+        else if (t==='inlineStr') val = iEl ? iEl.textContent : '';
+        else if (t==='str'&&vEl)  val = vEl.textContent;
+        else if (vEl)             val = isNaN(vEl.textContent) ? vEl.textContent : parseFloat(vEl.textContent);
+        sheet[r] = { v: val };
+      });
+      Sheets[name] = sheet;
+    });
+    return { SheetNames, Sheets };
+  }
+
+  return {
+    read(u8arr) { return parseXLSX(unzip(u8arr instanceof Uint8Array ? u8arr : new Uint8Array(u8arr))); },
+    utils: {
+      sheet_to_json(sheet, opts={}) {
+        if (!sheet) return [];
+        const entries = Object.entries(sheet); if (!entries.length) return [];
+        let maxR=0, maxC=0; const grid={};
+        entries.forEach(([ref,cell]) => {
+          const rc=cellRC(ref); if(!rc) return;
+          if(rc.r>maxR) maxR=rc.r; if(rc.c>maxC) maxC=rc.c;
+          grid[rc.r+','+rc.c]=cell.v;
+        });
+        const rows=[];
+        for(let r=0;r<=maxR;r++){
+          const row=[];
+          for(let c=0;c<=maxC;c++) row.push(grid[r+','+c]!==undefined?grid[r+','+c]:(opts.defval!==undefined?opts.defval:null));
+          rows.push(row);
+        }
+        if(opts.header===1) return rows;
+        const keys=rows[0]||[];
+        return rows.slice(1).map(row=>{
+          const obj={};
+          keys.forEach((k,i)=>{if(k!=null) obj[k]=row[i]??opts.defval??null;});
+          return obj;
+        });
+      }
+    }
+  };
+})();
+</script>
+<style>
+  :root {
+    --sidebar-w: 260px;
+    --bg-sidebar: #0f1117;
+    --bg-content: #f5f6fa;
+    --accent: #4f6ef7;
+    --accent-hover: #3d5be4;
+    --accent-glow: rgba(79,110,247,0.25);
+    --text-primary: #1a1d2e;
+    --text-muted: #6b7280;
+    --border: #e5e7eb;
+    --node-start: #10b981;
+    --node-end: #ef4444;
+    --node-process: #4f6ef7;
+    --node-decision: #f59e0b;
+    --panel-bg: #ffffff;
+    --sidebar-item-hover: rgba(255,255,255,0.06);
+    --sidebar-item-active: rgba(79,110,247,0.2);
+    --bg-sidebar: #0f1117;
+    --sidebar-border: rgba(255,255,255,0.06);
+    --sidebar-header-border: rgba(255,255,255,0.07);
+    --sidebar-label-color: rgba(255,255,255,0.3);
+    --sidebar-footer-color: rgba(255,255,255,0.2);
+    --sidebar-text: rgba(255,255,255,0.6);
+    --sidebar-text-hover: rgba(255,255,255,0.9);
+    --sidebar-text-active: #fff;
+    --logo-color: #fff;
+    --upload-btn-bg: rgba(255,255,255,0.08);
+    --upload-btn-border: rgba(255,255,255,0.2);
+    --upload-btn-color: rgba(255,255,255,0.7);
+    --upload-btn-hover-bg: rgba(255,255,255,0.12);
+    --no-topics-color: rgba(255,255,255,0.3);
+    --scrollbar-thumb-sidebar: rgba(255,255,255,0.15);
+    --scrollbar-thumb: #d1d5db;
+    --btn-ghost-hover-bg: #f1f2f6;
+    --progress-track-bg: #e5e7eb;
+    --speed-slider-bg: #e5e7eb;
+  }
+  [data-theme="dark"] {
+    --bg-content: #13151f;
+    --text-primary: #e8eaf0;
+    --text-muted: #8b93a8;
+    --border: #2a2d3e;
+    --panel-bg: #1c1f2e;
+    --scrollbar-thumb: #3a3d52;
+    --btn-ghost-hover-bg: #252838;
+    --progress-track-bg: #2a2d3e;
+    --speed-slider-bg: #2a2d3e;
+  }
+  [data-theme="light"] {
+    --sidebar-item-hover: rgba(0,0,0,0.05);
+    --sidebar-item-active: rgba(79,110,247,0.12);
+    --bg-sidebar: #f0f2f8;
+    --sidebar-border: rgba(0,0,0,0.07);
+    --sidebar-header-border: rgba(0,0,0,0.08);
+    --sidebar-label-color: #9ca3af;
+    --sidebar-footer-color: #b0b7c3;
+    --sidebar-text: #4b5563;
+    --sidebar-text-hover: #1a1d2e;
+    --sidebar-text-active: #1a1d2e;
+    --logo-color: #1a1d2e;
+    --upload-btn-bg: rgba(0,0,0,0.04);
+    --upload-btn-border: rgba(0,0,0,0.15);
+    --upload-btn-color: #6b7280;
+    --upload-btn-hover-bg: rgba(0,0,0,0.08);
+    --no-topics-color: #9ca3af;
+    --scrollbar-thumb-sidebar: rgba(0,0,0,0.15);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: 'Segoe UI', Arial, sans-serif; background: var(--bg-content); color: var(--text-primary); overflow: hidden; }
+
+  /* ── Layout ─────────────────────────────── */
+  #app { display: flex; height: 100vh; overflow: hidden; }
+
+  /* ── Sidebar ─────────────────────────────── */
+  #sidebar {
+    width: var(--sidebar-w);
+    flex-shrink: 0;
+    background: var(--bg-sidebar);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-right: 1px solid var(--sidebar-border); transition: background 0.3s, border-color 0.3s;
+  }
+  .sidebar-header {
+    padding: 24px 20px 18px;
+    border-bottom: 1px solid var(--sidebar-header-border);
+  }
+  .logo {
+    display: flex; align-items: center; gap: 10px;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 20px; font-weight: 800; color: var(--logo-color); transition: color 0.3s;
+    letter-spacing: -0.5px; margin-bottom: 18px;
+  }
+  .logo-icon {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), #7c3aed);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+  }
+  .upload-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; padding: 10px 14px;
+    background: var(--upload-btn-bg);
+    border: 1.5px dashed var(--upload-btn-border);
+    border-radius: 10px;
+    color: var(--upload-btn-color); font-family: 'Segoe UI', Arial, sans-serif; transition: all 0.2s;
+    font-size: 13px; font-weight: 500; cursor: pointer;
+    transition: all 0.2s;
+  }
+  .upload-btn:hover { background: var(--upload-btn-hover-bg); border-color: var(--accent); color: var(--sidebar-text-active); }
+  .upload-btn input { display: none; }
+  .sidebar-section-label {
+    padding: 16px 20px 8px;
+    font-size: 10px; font-weight: 700; letter-spacing: 1.5px;
+    text-transform: uppercase; color: var(--sidebar-label-color); transition: color 0.3s;
+  }
+  #topicList { flex: 1; overflow-y: auto; padding: 4px 10px 10px; }
+  #topicList::-webkit-scrollbar { width: 4px; }
+  #topicList::-webkit-scrollbar-track { background: transparent; }
+  #topicList::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb-sidebar); border-radius: 4px; }
+  .topic-item {
+    padding: 10px 14px; border-radius: 8px; cursor: pointer;
+    display: flex; align-items: center; gap: 10px;
+    color: var(--sidebar-text); font-size: 13.5px; font-weight: 400;
+    transition: all 0.18s; margin-bottom: 2px; user-select: none;
+  }
+  .topic-item:hover { background: var(--sidebar-item-hover); color: var(--sidebar-text-hover); }
+  .topic-item.active {
+    background: var(--sidebar-item-active);
+    color: var(--sidebar-text-active); font-weight: 500;
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .topic-icon { font-size: 15px; flex-shrink: 0; }
+  .topic-label { flex: 1; line-height: 1.3; }
+  .sidebar-footer {
+    padding: 14px 20px; border-top: 1px solid var(--sidebar-header-border);
+    color: var(--sidebar-footer-color); font-size: 11px;
+  }
+  .no-topics {
+    padding: 20px 14px; color: var(--no-topics-color);
+    font-size: 12.5px; line-height: 1.6; text-align: center;
+  }
+
+  /* ── Main Content ────────────────────────── */
+  #content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Welcome screen */
+  #welcome-screen {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 20px; padding: 40px;
+    text-align: center;
+  }
+  .welcome-icon { font-size: 56px; margin-bottom: 8px; }
+  .welcome-title { font-family: 'Segoe UI', Arial, sans-serif; font-size: 30px; font-weight: 700; color: var(--text-primary); }
+  .welcome-sub { color: var(--text-muted); font-size: 15px; max-width: 440px; line-height: 1.6; }
+  .welcome-steps {
+    display: flex; gap: 14px; margin-top: 8px; flex-wrap: wrap; justify-content: center;
+  }
+  .welcome-step {
+    background: var(--panel-bg); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 20px;
+    text-align: left; width: 200px;
+  }
+  .welcome-step .step-num { font-size: 22px; margin-bottom: 8px; }
+  .welcome-step h4 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+  .welcome-step p { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+
+  /* Flowchart screen */
+  #flowchart-screen {
+    flex: 1; display: none; flex-direction: column; overflow: hidden;
+  }
+  #flowchart-screen.visible { display: flex; }
+
+  /* Top bar */
+  #topbar {
+    background: var(--panel-bg); border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    display: flex; align-items: center; gap: 16px; flex-shrink: 0;
+    height: 64px;
+  }
+  #topic-title {
+    font-family: 'Segoe UI', Arial, sans-serif; font-size: 18px; font-weight: 700;
+    color: var(--text-primary); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .controls { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .btn {
+    padding: 7px 16px; border-radius: 8px; font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.18s;
+    border: 1.5px solid transparent; display: flex; align-items: center; gap: 6px;
+  }
+  .btn-ghost { background: transparent; border-color: var(--border); color: var(--text-muted); }
+  .btn-ghost:hover { background: var(--btn-ghost-hover-bg); color: var(--text-primary); border-color: var(--border); }
+  .btn-ghost:disabled { opacity: 0.35; cursor: default; }
+  .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-play { min-width: 110px; justify-content: center; }
+  .speed-wrap {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--text-muted); padding-left: 4px;
+  }
+  #speedSlider {
+    -webkit-appearance: none; width: 90px; height: 4px;
+    border-radius: 4px; background: var(--speed-slider-bg); outline: none;
+  }
+  #speedSlider::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px;
+    border-radius: 50%; background: var(--accent); cursor: pointer;
+  }
+  .divider { width: 1px; height: 28px; background: var(--border); flex-shrink: 0; }
+
+  /* Progress bar */
+  #progress-bar-wrap {
+    background: var(--panel-bg); border-bottom: 1px solid var(--border);
+    padding: 8px 24px; flex-shrink: 0;
+    display: flex; align-items: center; gap: 14px;
+  }
+  #progress-track {
+    flex: 1; height: 6px; background: var(--progress-track-bg); border-radius: 6px; overflow: hidden;
+  }
+  #progress-fill {
+    height: 100%; background: linear-gradient(90deg, var(--accent), #7c3aed);
+    border-radius: 6px; transition: width 0.4s ease; width: 0%;
+  }
+  #progress-label { font-size: 12px; color: var(--text-muted); white-space: nowrap; font-family: 'Courier New', Courier, monospace; }
+
+  /* Flowchart viewport */
+  /* Outer wrap: side-by-side sticky header + scrollable SVG */
+  #flowchart-wrap {
+    flex: 1; display: flex; overflow: hidden; min-height: 0;
+    background: var(--bg-content);
+  }
+  /* Sticky lane-label column — height = visible area, scrollTop synced to viewport */
+  #lane-headers {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    z-index: 10;
+    overflow: hidden;  /* clip to visible area; scrollTop moved by JS */
+    align-self: stretch; /* fill full height of wrap */
+  }
+  .lane-header-cell {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700;
+    color: #fff; text-align: center;
+    padding: 0 8px;
+    box-sizing: border-box;
+  }
+  /* Scrollable SVG area */
+  #flowchart-viewport {
+    flex: 1; overflow: auto; min-height: 0; min-width: 0;
+    background: var(--bg-content);
+    display: block;
+    padding: 0;
+  }
+  #flowchart-viewport::-webkit-scrollbar { height: 6px; width: 6px; }
+  #flowchart-viewport::-webkit-scrollbar-track { background: transparent; }
+  #flowchart-viewport::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 6px; }
+  #flowchart-svg { display: block; overflow: visible; }
+
+  /* Step detail panel */
+  #step-detail {
+    background: var(--panel-bg); border-top: 1px solid var(--border);
+    padding: 16px 28px; flex-shrink: 0;
+    display: flex; align-items: flex-start; gap: 24px; min-height: 90px;
+  }
+  #step-detail.hidden { opacity: 0.4; }
+  .detail-badge {
+    flex-shrink: 0; width: 42px; height: 42px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Courier New', Courier, monospace; font-size: 15px; font-weight: 600;
+    color: #fff; background: var(--accent);
+  }
+  .detail-body { flex: 1; }
+  .detail-name {
+    font-family: 'Segoe UI', Arial, sans-serif; font-size: 16px; font-weight: 700;
+    color: var(--text-primary); margin-bottom: 3px;
+  }
+  .detail-desc { font-size: 13px; color: var(--text-muted); line-height: 1.5; margin-bottom: 5px; }
+  .detail-meta { display: flex; gap: 14px; flex-wrap: wrap; }
+  .meta-chip {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 12px; color: var(--text-muted);
+    background: var(--bg-content); padding: 3px 10px; border-radius: 20px;
+    border: 1px solid var(--border);
+  }
+  .detail-placeholder {
+    flex: 1; font-size: 13px; color: var(--text-muted);
+    font-style: italic; display: flex; align-items: center;
+  }
+
+  /* Legend */
+  #legend {
+    display: flex; align-items: center; gap: 18px; flex-shrink: 0;
+    padding-right: 8px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
+  .legend-dot { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+
+
+  /* ── Theme Toggle ────────────────────────── */
+  .theme-toggle {
+    display: flex; align-items: center;
+  }
+  .toggle-pill {
+    position: relative; width: 44px; height: 24px;
+    background: rgba(255,255,255,0.12); border-radius: 12px;
+    cursor: pointer; transition: background 0.3s; border: none; padding: 0; flex-shrink: 0;
+  }
+  .toggle-pill.on { background: var(--accent); }
+  .toggle-pill::after {
+    content: ''; position: absolute; top: 3px; left: 3px;
+    width: 18px; height: 18px; border-radius: 50%; background: #fff;
+    transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  }
+  .toggle-pill.on::after { transform: translateX(20px); }
+  .toggle-label { display: flex; align-items: center; gap: 7px; }
+  .sidebar-footer-copy { color: var(--sidebar-footer-color); font-size: 11px; transition: color 0.3s; }
+  .dev-credit {
+    padding: 10px 20px 16px;
+    border-top: 1px solid var(--sidebar-header-border);
+    font-size: 11px;
+    color: var(--sidebar-footer-color);
+    line-height: 1.7;
+    text-align: center;
+    transition: color 0.3s, border-color 0.3s;
+  }
+  .dev-credit strong { color: var(--sidebar-text); font-size: 12px; display: block; margin-bottom: 2px; }
+  .dev-credit a { color: var(--sidebar-footer-color); text-decoration: none; }
+  .dev-credit a:hover { color: var(--accent); }
+
+  /* Node hover / active */
+  .flow-node { cursor: pointer; }
+  .flow-node:hover .node-shape { filter: brightness(1.1); }
+  .flow-node.node-active .node-shape { filter: drop-shadow(0 0 8px var(--accent-glow)); }
+
+  /* Animations */
+  @keyframes nodeIn {
+    from { opacity: 0; transform: scale(0.6); }
+    to   { opacity: 1; transform: scale(1); }
+  }
+  @keyframes arrowIn {
+    from { opacity: 0; stroke-dashoffset: 200; }
+    to   { opacity: 1; stroke-dashoffset: 0; }
+  }
+  .anim-node-in {
+    animation: nodeIn 0.45s cubic-bezier(0.34,1.56,0.64,1) forwards;
+  }
+  .anim-arrow-in {
+    animation: arrowIn 0.4s ease forwards;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Sidebar ──────────────────────────── -->
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <div class="logo-icon">⚡</div>
+        DemoFlow
+        <div class="theme-toggle" style="margin-left:auto">
+          <button class="toggle-pill" id="themeToggle" title="Toggle dark/light mode"></button>
+        </div>
+      </div>
+      <label class="upload-btn">
+        <input type="file" id="fileInput" accept=".xlsx,.xls">
+        📂 Load Excel File
+      </label>
+    </div>
+    <div class="sidebar-section-label">Work Topics</div>
+    <nav id="topicList">
+      <div class="no-topics">Load an Excel file to see work topics here.</div>
+    </nav>
+    <div class="dev-credit">
+      <strong>DemoFlow</strong>
+      Developed by Komsan Kongsuwan<br>
+      <a href="/cdn-cgi/l/email-protection#d7bcb8baa4b6b9f9bcb8b9b0a4a2a0b6b997b0bab6bebbf9b4b8ba"><span class="__cf_email__" data-cfemail="d0bbbfbda3b1befebbbfbeb7a3a5a7b1be90b7bdb1b9bcfeb3bfbd">[email&#160;protected]</span></a><br>
+      +66-81-723-9680
+    </div>
+  </aside>
+
+  <!-- ── Main Content ──────────────────────── -->
+  <main id="content">
+
+    <!-- Welcome -->
+    <div id="welcome-screen">
+      <div class="welcome-icon">📋</div>
+      <div class="welcome-title">DemoFlow</div>
+      <div class="welcome-sub" id="welcome-sub">Loading demo flowchart...</div>
+      <div class="welcome-steps">
+        <div class="welcome-step">
+          <div class="step-num">📂</div>
+          <h4>1. Load File</h4>
+          <p>Click "Load Excel File" in the sidebar and select your .xlsx file.</p>
+        </div>
+        <div class="welcome-step">
+          <div class="step-num">📑</div>
+          <h4>2. Pick a Topic</h4>
+          <p>Each sheet in the workbook becomes a topic in the sidebar.</p>
+        </div>
+        <div class="welcome-step">
+          <div class="step-num">▶️</div>
+          <h4>3. View & Navigate</h4>
+          <p>Use Auto-Play or step through manually with Next / Prev.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Flowchart Screen -->
+    <div id="flowchart-screen">
+      <!-- Top bar -->
+      <div id="topbar">
+        <div id="topic-title">—</div>
+        <div id="legend">
+          <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Start</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#4f6ef7;border-radius:2px"></div> Process</div>
+          <div class="legend-item" style="gap:5px">
+            <svg width="14" height="12" viewBox="0 0 14 12">
+              <path d="M0,0 L14,0 L14,8 Q10.5,12 7,8 Q3.5,4 0,8 Z" fill="#7c5cbf"/>
+            </svg> Document
+          </div>
+          <div class="legend-item" style="gap:4px"><svg width="12" height="12" viewBox="0 0 12 12"><polygon points="6,0 12,6 6,12 0,6" fill="#f59e0b"/></svg> Decision</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div> End</div>
+        </div>
+        <div class="divider"></div>
+        <div class="controls">
+          <button class="btn btn-ghost" id="resetBtn">↺ Reset</button>
+          <button class="btn btn-ghost btn-ghost" id="prevBtn" disabled>← Prev</button>
+          <button class="btn btn-ghost" id="nextBtn">Next →</button>
+          <button class="btn btn-primary btn-play" id="playBtn">▶ Auto Play</button>
+          <div class="divider"></div>
+          <div class="speed-wrap">
+            Speed
+            <input type="range" id="speedSlider" min="1" max="5" value="3">
+          </div>
+        </div>
+      </div>
+
+      <!-- Progress -->
+      <div id="progress-bar-wrap">
+        <div id="progress-track"><div id="progress-fill"></div></div>
+        <div id="progress-label">0 / 0</div>
+      </div>
+
+      <!-- SVG viewport -->
+      <div id="flowchart-wrap">
+        <!-- Sticky lane-label column — fixed on left, doesn't scroll -->
+        <div id="lane-headers"></div>
+        <!-- Scrollable SVG area -->
+        <div id="flowchart-viewport">
+          <svg id="flowchart-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+      </div>
+
+      <!-- Step detail panel -->
+      <div id="step-detail">
+        <div class="detail-placeholder">Select a step in the flowchart or press Next to begin.</div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
+/* ═══════════════════════════════════════════════════════
+   CONFIG & CONSTANTS  (swim-lane HORIZONTAL layout)
+   Lanes = horizontal rows · Flow = left → right
+═══════════════════════════════════════════════════════ */
+const LANE_H    = 160;   // height of each swimlane row
+const HEADER_W  = 110;   // left lane-label strip width
+const COL_W     = 210;   // horizontal distance between node centres
+const NW = 155, NH = 58; // node width / height
+const PAD_L     = 30;    // padding before first column
+const PAD_R     = 50;    // padding after last column
+const MARGIN    = 22;    // clearance outside lanes for No routing
+const DIAMOND_HW = NW / 2 + 10;
+const DIAMOND_HH = NH / 2 + 8;
+
+// Lane definitions — first match wins
+// LANE_DEFS is built dynamically from the Excel Role column each time a topic loads.
+// It is populated by buildLaneDefs(steps) before buildLayout() runs.
+let LANE_DEFS = [];
+
+/* Build lane definitions from the unique Role values in the loaded steps.
+   Roles appear in the order they are first encountered (by step_id).
+   This makes the viewer work with ANY number of swimlanes automatically. */
+function buildLaneDefs(steps) {
+  const seen = new Map(); // role string → lane index
+  const sorted = [...steps].sort((a, b) => a.step_id - b.step_id);
+  sorted.forEach(s => {
+    const role = (s.role || '').trim();
+    if (role && !seen.has(role)) seen.set(role, seen.size);
+  });
+  LANE_DEFS = [...seen.keys()].map(label => ({ label }));
+}
+
+/* Role → lane index: exact match first, then partial, then last lane */
+function getRoleLane(role) {
+  const r = (role || '').trim();
+  // Exact match
+  const exact = LANE_DEFS.findIndex(d => d.label === r);
+  if (exact !== -1) return exact;
+  // Partial match (case-insensitive)
+  const rl = r.toLowerCase();
+  const partial = LANE_DEFS.findIndex(d => rl.includes(d.label.toLowerCase()) || d.label.toLowerCase().includes(rl));
+  if (partial !== -1) return partial;
+  // Fallback: last lane
+  return Math.max(0, LANE_DEFS.length - 1);
+}
+
+const NODE_COLORS = {
+  START:    { fill: '#10b981', stroke: '#059669', text: '#fff',    label: 'START' },
+  END:      { fill: '#ef4444', stroke: '#dc2626', text: '#fff',    label: 'END' },
+  PROCESS:  { fill: '#4f6ef7', stroke: '#3d5be4', text: '#fff',    label: 'PROCESS' },
+  DOCUMENT: { fill: '#7c5cbf', stroke: '#6344a8', text: '#fff',    label: 'DOCUMENT' },
+  DECISION: { fill: '#f59e0b', stroke: '#d97706', text: '#1a1a1a', label: 'DECISION' },
+};
+
+const SPEED_MAP = { 1: 2200, 2: 1600, 3: 1100, 4: 700, 5: 350 };
+
+/* getRoleLane defined above in dynamic LANE_DEFS section */
+
+/* ─── Coordinate helpers (HORIZONTAL) ───────────────
+   lane  = swimlane row (0 = top, 1 = middle, 2 = bottom)
+   svgCol = step column left→right (0, 1, 2 …)          */
+function laneTop(l)   { return l * LANE_H; }
+function laneCY(l)    { return l * LANE_H + LANE_H / 2; }
+function nodeX(col)   { return HEADER_W + PAD_L + col * COL_W - NW / 2; }
+function nodeY(lane)  { return laneCY(lane) - NH / 2; }
+function nodeCX(col)  { return HEADER_W + PAD_L + col * COL_W; }
+function nodeCY(lane) { return laneCY(lane); }
+
+/* ═══════════════════════════════════════════════════════
+   STATE
+═══════════════════════════════════════════════════════ */
+let wb = null, topics = [], currentNodes = [], revealOrder = [];
+let revealedCount = 0, isPlaying = false, playTimer = null;
+
+/* ═══════════════════════════════════════════════════════
+   FILE LOADING
+═══════════════════════════════════════════════════════ */
+document.getElementById('fileInput').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    try {
+      wb = XLSX.read(new Uint8Array(ev.target.result));
+      topics = wb.SheetNames.filter(n => !/readme/i.test(n));
+      renderSidebar();
+      if (topics.length) selectTopic(topics[0]);
+    } catch(e) {
+      alert('Could not read file: ' + e.message);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+/* ═══════════════════════════════════════════════════════
+   SIDEBAR
+═══════════════════════════════════════════════════════ */
+function renderSidebar() {
+  const nav = document.getElementById('topicList');
+  nav.innerHTML = '';
+  if (!topics.length) {
+    nav.innerHTML = '<div class="no-topics">No valid sheets found.</div>';
+    return;
+  }
+  topics.forEach(name => {
+    const el = document.createElement('div');
+    el.className = 'topic-item';
+    el.dataset.topic = name;
+    el.innerHTML = `<span class="topic-icon">📋</span><span class="topic-label">${name}</span>`;
+    el.addEventListener('click', () => selectTopic(name));
+    nav.appendChild(el);
+  });
+}
+
+function selectTopic(name) {
+  document.querySelectorAll('.topic-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.topic === name));
+  stopPlay();
+  // Use embedded demo steps if available and sheet not in workbook
+  const steps = (window._demoSteps && name === window._demoTopic && wb && !wb.Sheets[name])
+    ? window._demoSteps
+    : parseSheet(name);
+  buildLaneDefs(steps);
+  currentNodes = buildLayout(steps);
+  revealOrder  = buildRevealOrder(currentNodes);
+  revealedCount = 0;
+  renderFlowchart(currentNodes);
+  updateProgress();
+  updateControls();
+  showDetailPanel(null);
+  document.getElementById('topic-title').textContent = name;
+  document.getElementById('welcome-screen').style.display = 'none';
+  document.getElementById('flowchart-screen').classList.add('visible');
+}
+
+/* ═══════════════════════════════════════════════════════
+   PARSE SHEET
+═══════════════════════════════════════════════════════ */
+function parseSheet(name) {
+  const sheet = wb.Sheets[name];
+  const rows  = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
+  let hi = rows.findIndex(r => r.some(c => String(c || '').trim() === 'Step_No'));
+  if (hi === -1) hi = 0;
+  const headers = rows[hi].map(h => String(h || '').trim());
+  const col = h => headers.indexOf(h);
+  const steps = [];
+  for (let i = hi + 1; i < rows.length; i++) {
+    const r  = rows[i];
+    const id = parseInt(r[col('Step_No')]);
+    if (isNaN(id)) continue;
+    steps.push({
+      step_id:  id,
+      name:     String(r[col('Step_Name')]   || '').trim(),
+      desc:     String(r[col('Description')] || '').trim(),
+      role:     String(r[col('Role')]         || '').trim(),
+      type:     String(r[col('Node_Type')]    || 'PROCESS').trim().toUpperCase(),
+      next_yes: parseInt(r[col('Next_Yes')]) || null,
+      next_no:  parseInt(r[col('Next_No')])  || null,
+      notes:    String(r[col('Notes')]        || '').trim(),
+      link:     String(r[col('Link')]         || '').trim(),
+    });
+  }
+  return steps;
+}
+
+/* ═══════════════════════════════════════════════════════
+   LAYOUT ENGINE  (horizontal — assigns lane + svgCol)
+═══════════════════════════════════════════════════════ */
+function buildLayout(steps) {
+  const map = {};
+  steps.forEach(s => map[s.step_id] = { ...s, lane: getRoleLane(s.role), svgCol: 0 });
+
+  // Forward-edge topological sort → svgCol
+  const inCount = {};
+  Object.values(map).forEach(n => { inCount[n.step_id] = 0; });
+  Object.values(map).forEach(n => {
+    [n.next_yes, n.next_no].forEach(nid => {
+      if (nid && map[nid] && nid > n.step_id) inCount[nid]++;
+    });
+  });
+
+  const colOf = {};
+  const queue = Object.values(map)
+    .filter(n => inCount[n.step_id] === 0)
+    .sort((a, b) => a.step_id - b.step_id)
+    .map(n => n.step_id);
+  queue.forEach(id => { colOf[id] = 0; });
+
+  const processed = new Set();
+  while (queue.length) {
+    const id = queue.shift();
+    if (processed.has(id)) continue;
+    processed.add(id);
+    const node = map[id];
+    const myCol = colOf[id] !== undefined ? colOf[id] : 0;
+    node.svgCol = myCol;
+    [node.next_yes, node.next_no].forEach(nid => {
+      if (!nid || !map[nid] || nid <= id) return;
+      colOf[nid] = Math.max(colOf[nid] || 0, myCol + 1);
+      inCount[nid]--;
+      if (inCount[nid] <= 0) queue.push(nid);
+    });
+  }
+  let maxCol = Math.max(0, ...Object.values(colOf));
+  Object.values(map).forEach(n => {
+    if (!processed.has(n.step_id)) n.svgCol = colOf[n.step_id] || ++maxCol;
+  });
+
+  // Collision resolver: no two nodes share same (lane, svgCol)
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const occupied = new Set();
+    const sorted = Object.values(map).sort((a, b) => a.step_id - b.step_id);
+    for (const node of sorted) {
+      const key = `${node.lane},${node.svgCol}`;
+      if (occupied.has(key)) {
+        node.svgCol += 1;
+        [node.next_yes, node.next_no].forEach(nid => {
+          if (nid && map[nid] && map[nid].svgCol <= node.svgCol)
+            map[nid].svgCol = node.svgCol + 1;
+        });
+        changed = true; break;
+      }
+      occupied.add(key);
+    }
+  }
+
+  return Object.values(map);
+}
+
+/* ═══════════════════════════════════════════════════════
+   REVEAL ORDER  (strict step_id order)
+═══════════════════════════════════════════════════════ */
+function buildRevealOrder(nodes) {
+  return [...nodes].sort((a, b) => a.step_id - b.step_id);
+}
+
+/* ═══════════════════════════════════════════════════════
+   SVG HELPER
+═══════════════════════════════════════════════════════ */
+function svgEl(tag, attrs = {}) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  Object.entries(attrs).forEach(([k, v]) => el.setAttribute(k, v));
+  return el;
+}
+
+/* ═══════════════════════════════════════════════════════
+   RENDER FLOWCHART  (horizontal swimlanes)
+═══════════════════════════════════════════════════════ */
+function renderFlowchart(nodes) {
+  const svg = document.getElementById('flowchart-svg');
+  svg.innerHTML = '';
+
+  const numLanes = LANE_DEFS.length;
+  const maxCol   = Math.max(...nodes.map(n => n.svgCol));
+  const svgW = HEADER_W + PAD_L + maxCol * COL_W + NW / 2 + PAD_R;
+  const svgH = numLanes * LANE_H;
+
+  svg.setAttribute('viewBox', `0 0 ${svgW} ${svgH}`);
+  svg.setAttribute('width',   svgW);
+  svg.setAttribute('height',  svgH);
+
+  // Auto-generate lane colors for any number of lanes
+  const PALETTE = ['#10b981','#4f6ef7','#f59e0b','#e05c2a','#7c5cbf','#0ea5e9','#ec4899','#84cc16'];
+  const laneColors    = LANE_DEFS.map((_,i) => {
+    const hex = PALETTE[i % PALETTE.length];
+    const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
+    return `rgba(${r},${g},${b},0.07)`;
+  });
+  const laneHdrColors = LANE_DEFS.map((_,i) => PALETTE[i % PALETTE.length]);
+
+  // ── Lane header blocks drawn in SVG — scroll with content ─────────────
+  // They are at x=0..HEADER_W and use position:sticky via CSS on SVG is not
+  // possible, so we use a foreignObject overlay trick: draw header in SVG but
+  // make it sticky via JS on scroll.
+  // ── HTML sticky lane headers (left of viewport, don't scroll) ──────────
+  const hdrDiv = document.getElementById('lane-headers');
+  hdrDiv.style.display     = 'flex';
+  hdrDiv.style.flexDirection = 'column';
+  hdrDiv.style.width         = HEADER_W + 'px';
+  hdrDiv.style.minWidth      = HEADER_W + 'px';
+  // height is controlled by CSS (align-self:stretch) — don't override it
+  hdrDiv.innerHTML = '';
+  for (let l = 0; l < numLanes; l++) {
+    const cell = document.createElement('div');
+    cell.className        = 'lane-header-cell';
+    cell.style.height     = LANE_H + 'px';
+    cell.style.minHeight  = LANE_H + 'px';
+    cell.style.background = laneHdrColors[l];
+    cell.style.borderBottom = l < numLanes-1 ? '1px solid rgba(255,255,255,0.25)' : 'none';
+    cell.textContent = LANE_DEFS[l].label;
+    hdrDiv.appendChild(cell);
+  }
+
+
+
+  // ── SVG lane backgrounds ───────────────────────────────────────────────
+  for (let l = 0; l < numLanes; l++) {
+    svg.appendChild(svgEl('rect', {
+      x: 0, y: laneTop(l), width: svgW, height: LANE_H, fill: laneColors[l]
+    }));
+    if (l > 0) svg.appendChild(svgEl('line', {
+      x1: 0, y1: laneTop(l), x2: svgW, y2: laneTop(l),
+      stroke: '#d1d5db', 'stroke-width': '1', 'stroke-dasharray': '4 3'
+    }));
+  }
+
+  // Arrowhead markers
+  const defs = svgEl('defs');
+  [['arrow-normal','#6b7280'],['arrow-no','#e05c2a']].forEach(([id, col]) => {
+    const m = svgEl('marker', { id, markerWidth:'8', markerHeight:'6', refX:'7', refY:'3', orient:'auto' });
+    m.appendChild(svgEl('polygon', { points:'0 0, 8 3, 0 6', fill: col }));
+    defs.appendChild(m);
+  });
+  svg.appendChild(defs);
+
+  // Arrows (hidden initially)
+  const arrowLayer = svgEl('g', { id: 'arrow-layer' });
+  const nodeMap = {};
+  nodes.forEach(n => nodeMap[n.step_id] = n);
+
+  nodes.forEach(node => {
+    ['yes','no'].forEach(t => {
+      const nid = t === 'yes' ? node.next_yes : node.next_no;
+      if (!nid || !nodeMap[nid]) return;
+      const target = nodeMap[nid];
+      if (target.svgCol <= node.svgCol) return; // forward only
+      const el = buildArrow(node, target, t, nodeMap);
+      el.style.opacity = '0';
+      el.id = `arrow-${node.step_id}-${t}`;
+      arrowLayer.appendChild(el);
+    });
+  });
+  svg.appendChild(arrowLayer);
+
+  // Nodes (hidden initially)
+  const nodeLayer = svgEl('g', { id: 'node-layer' });
+  nodes.forEach(node => {
+    const g = buildNode(node);
+    g.style.opacity = '0';
+    g.style.transformOrigin = `${nodeCX(node.svgCol)}px ${nodeCY(node.lane)}px`;
+    g.id = `node-${node.step_id}`;
+    g.classList.add('flow-node');
+    g.addEventListener('click', () => {
+      const idx = revealOrder.findIndex(n => n.step_id === node.step_id);
+      if (idx !== -1 && idx < revealedCount) showDetailPanel(node);
+    });
+    nodeLayer.appendChild(g);
+  });
+  svg.appendChild(nodeLayer);
+}
+
+/* ═══════════════════════════════════════════════════════
+   BUILD NODE
+═══════════════════════════════════════════════════════ */
+function buildNode(node) {
+  const g  = svgEl('g');
+  const c  = NODE_COLORS[node.type] || NODE_COLORS.PROCESS;
+  const x  = nodeX(node.svgCol);
+  const y  = nodeY(node.lane);
+  const cx = nodeCX(node.svgCol);
+  const cy = nodeCY(node.lane);
+
+  // Shadow
+  if (node.type !== 'DECISION') {
+    const rx = (node.type === 'START' || node.type === 'END') ? NH/2 : 3;
+    g.appendChild(svgEl('rect', { x: x+3, y: y+4, width: NW, height: NH, rx, fill: 'rgba(0,0,0,0.15)' }));
+  }
+
+  let shape;
+  if (node.type === 'DECISION') {
+    shape = svgEl('polygon', {
+      points: `${cx},${cy-DIAMOND_HH} ${cx+DIAMOND_HW},${cy} ${cx},${cy+DIAMOND_HH} ${cx-DIAMOND_HW},${cy}`,
+      fill: c.fill, stroke: c.stroke, 'stroke-width': '2',
+      filter: 'drop-shadow(2px 3px 5px rgba(0,0,0,0.25))'
+    });
+  } else if (node.type === 'START' || node.type === 'END') {
+    shape = svgEl('rect', { x, y, width: NW, height: NH, rx: NH/2,
+      fill: c.fill, stroke: c.stroke, 'stroke-width': '2',
+      filter: 'drop-shadow(2px 3px 5px rgba(0,0,0,0.25))' });
+  } else if (node.type === 'DOCUMENT') {
+    const wv = 9;
+    const d = `M${x},${y} L${x+NW},${y} L${x+NW},${y+NH-wv} Q${x+NW*0.75},${y+NH+wv} ${x+NW*0.5},${y+NH-wv} Q${x+NW*0.25},${y+NH-wv*3} ${x},${y+NH-wv} Z`;
+    shape = svgEl('path', { d, fill: c.fill, stroke: c.stroke, 'stroke-width': '2',
+      filter: 'drop-shadow(2px 3px 5px rgba(0,0,0,0.25))' });
+  } else {
+    shape = svgEl('rect', { x, y, width: NW, height: NH, rx: 3,
+      fill: c.fill, stroke: c.stroke, 'stroke-width': '2',
+      filter: 'drop-shadow(2px 3px 5px rgba(0,0,0,0.25))' });
+  }
+  shape.classList.add('node-shape');
+  g.appendChild(shape);
+
+  // Step number badge
+  if (node.type !== 'DECISION') {
+    g.appendChild(svgEl('rect', { x: x+2, y: y+2, width: 20, height: 16, rx: 3, fill: 'rgba(255,255,255,0.18)' }));
+    const bt = svgEl('text', { x: x+12, y: y+13, 'text-anchor': 'middle',
+      'font-size': '9', 'font-weight': '700', fill: '#fff', 'font-family': 'Courier New, monospace' });
+    bt.textContent = node.step_id; g.appendChild(bt);
+  } else {
+    const bt = svgEl('text', { x: cx, y: cy-DIAMOND_HH+15, 'text-anchor': 'middle',
+      'font-size': '9', 'font-weight': '700', fill: c.text, 'font-family': 'Courier New, monospace' });
+    bt.textContent = node.step_id; g.appendChild(bt);
+  }
+
+  // Label — auto word-wrap
+  function wrapWords(words, maxLen) {
+    const lines = []; let cur = '';
+    words.forEach(w => {
+      const try_ = (cur ? cur + ' ' : '') + w;
+      if (try_.length > maxLen && cur) { lines.push(cur); cur = w; } else cur = try_;
+    });
+    if (cur) lines.push(cur); return lines;
+  }
+  const lines  = wrapWords(node.name.split(' '), 17);
+  const fs     = lines.length >= 3 ? '10' : '11';
+  const lh     = lines.length >= 3 ? 13 : 14;
+  const offY   = node.type === 'DOCUMENT' ? -3 : 0;
+  const totalH = (lines.length - 1) * lh;
+  const lbl = svgEl('text', { 'text-anchor': 'middle', fill: c.text,
+    'font-family': 'Segoe UI, Arial, sans-serif', 'font-weight': '600' });
+  lines.forEach((ln, i) => {
+    const t = svgEl('tspan', { x: cx, y: cy - totalH/2 + i*lh + 4 + offY, 'font-size': fs });
+    t.textContent = ln; lbl.appendChild(t);
+  });
+  g.appendChild(lbl);
+
+  // Link badge — 📝 at bottom-right corner if node has a link
+  if (node.link) {
+    const bx = x + NW - 18;
+    const by = y + NH - 18;
+    // Circle background
+    g.appendChild(svgEl('circle', {
+      cx: bx + 9, cy: by + 9, r: 11,
+      fill: '#f59e0b', opacity: '0.92',
+      filter: 'drop-shadow(1px 2px 3px rgba(0,0,0,0.35))'
+    }));
+    // 📝 emoji text
+    const linkIcon = svgEl('text', {
+      x: bx + 9, y: by + 14,
+      'text-anchor': 'middle', 'font-size': '12',
+      'font-family': 'Segoe UI Emoji, Arial, sans-serif',
+      style: 'cursor:pointer; user-select:none;'
+    });
+    linkIcon.textContent = '📝';
+    linkIcon.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.open(node.link, '_blank');
+    });
+    // Invisible larger hit area
+    const hitArea = svgEl('circle', {
+      cx: bx + 9, cy: by + 9, r: 14,
+      fill: 'transparent', style: 'cursor:pointer;'
+    });
+    hitArea.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.open(node.link, '_blank');
+    });
+    hitArea.setAttribute('title', node.link);
+    g.appendChild(linkIcon);
+    g.appendChild(hitArea);
+  }
+
+  return g;
+}
+
+/* ═══════════════════════════════════════════════════════
+   BUILD ARROW  (horizontal routing)
+   YES  → exit right side → H-jog or straight → enter left side
+   NO   → exit bottom/top tip → outside all lanes → enter left side
+═══════════════════════════════════════════════════════ */
+function buildArrow(from, to, type, nodeMap) {
+  const g      = svgEl('g');
+  const isNo   = type === 'no';
+  const color  = isNo ? '#e05c2a' : '#6b7280';
+  const marker = isNo ? 'url(#arrow-no)' : 'url(#arrow-normal)';
+  const R      = 6;
+  const numLanes = LANE_DEFS.length;
+
+  const fC = from.svgCol, fL = from.lane;
+  const tC = to.svgCol,   tL = to.lane;
+  const sameLane = fL === tL;
+  const goDown   = tL > fL;
+
+  // Rounded elbow helper
+  function elbow(ax,ay, mx,my, bx,by) {
+    const r = Math.min(R, (Math.abs(mx-ax)+Math.abs(my-ay))/2, (Math.abs(bx-mx)+Math.abs(by-my))/2);
+    const dax=(mx===ax)?0:(mx>ax?1:-1)*r, day=(my===ay)?0:(my>ay?1:-1)*r;
+    const dbx=(bx===mx)?0:(bx>mx?1:-1)*r, dby=(by===my)?0:(by>my?1:-1)*r;
+    return `L ${mx-dax} ${my-day} Q ${mx} ${my} ${mx+dbx} ${my+dby}`;
+  }
+
+  let sx, sy, ex, ey, pathD;
+
+  if (!isNo) {
+    // YES: exit right side → enter left side of target
+    sx = (from.type==='DECISION') ? nodeCX(fC)+DIAMOND_HW : nodeX(fC)+NW;
+    sy = nodeCY(fL);
+    ex = (to.type==='DECISION')   ? nodeCX(tC)-DIAMOND_HW : nodeX(tC);
+    ey = nodeCY(tL);
+
+    if (Math.abs(sy - ey) < 2) {
+      // Same lane — pure horizontal
+      pathD = `M ${sx} ${sy} L ${ex} ${ey}`;
+    } else {
+      // H → V → H  (mid-column jog)
+      const midX = sx + (ex - sx) / 2;
+      const r1 = Math.min(R, Math.abs(midX-sx)/2, Math.abs(ey-sy)/2);
+      const r2 = Math.min(R, Math.abs(ex-midX)/2, Math.abs(ey-sy)/2);
+      const dv = ey > sy ? 1 : -1;
+      pathD = [
+        `M ${sx} ${sy}`,
+        `L ${midX-r1} ${sy}`,
+        `Q ${midX} ${sy} ${midX} ${sy+dv*r1}`,
+        `L ${midX} ${ey-dv*r2}`,
+        `Q ${midX} ${ey} ${midX+r2} ${ey}`,
+        `L ${ex} ${ey}`
+      ].join(' ');
+    }
+  } else {
+    // NO: exit top tip (target above) or bottom tip (target below) →
+    // direct L-shape: vertical to target lane centre Y → horizontal into target left side.
+    // No U-turn outside lanes — just a clean two-segment orthogonal path.
+    const exitTop = tL < fL; // target is in a higher (lower-index) lane → exit top tip
+    sx = nodeCX(fC);
+    sy = exitTop ? nodeCY(fL) - DIAMOND_HH : nodeCY(fL) + DIAMOND_HH;
+    ex = (to.type==='DECISION') ? nodeCX(tC) - DIAMOND_HW : nodeX(tC);
+    ey = nodeCY(tL);
+
+    // V → H: go vertically from diamond tip to target lane centre Y,
+    //         then horizontally into the left side of the target node.
+    const r1 = Math.min(R, Math.abs(ey - sy) / 2, Math.abs(ex - sx) / 2);
+    const dv = ey < sy ? -1 : 1;
+    const dh = ex > sx ? 1 : -1;
+    pathD = [
+      `M ${sx} ${sy}`,
+      `L ${sx} ${ey - dv * r1}`,
+      `Q ${sx} ${ey} ${sx + dh * r1} ${ey}`,
+      `L ${ex} ${ey}`
+    ].join(' ');
+  }
+
+  g.appendChild(svgEl('path', {
+    d: pathD, stroke: color, 'stroke-width': '2',
+    fill: 'none', 'marker-end': marker,
+    'stroke-dasharray': isNo ? '6 3' : 'none'
+  }));
+
+  // Yes / No label
+  if (from.type === 'DECISION') {
+    let lx, ly;
+    if (!isNo) {
+      lx = nodeCX(fC) + DIAMOND_HW + 16; ly = nodeCY(fL) - 8;
+    } else {
+      // Label near the tip the No arrow exits from
+      const exitTop = tL < fL;
+      lx = nodeCX(fC) + 16;
+      ly = exitTop ? nodeCY(fL) - DIAMOND_HH - 10 : nodeCY(fL) + DIAMOND_HH + 14;
+    }
+    g.appendChild(svgEl('rect', { x:lx-14, y:ly-12, width:28, height:16, rx:3, fill:'white', opacity:'0.9' }));
+    const lbl = svgEl('text', { x:lx, y:ly, 'text-anchor':'middle',
+      'font-size':'11', 'font-weight':'700', 'font-family':'Segoe UI, Arial, sans-serif',
+      fill: isNo ? '#dc4a0a' : '#16a34a' });
+    lbl.textContent = isNo ? 'No' : 'Yes';
+    g.appendChild(lbl);
+  }
+
+  return g;
+}
+
+/* ═══════════════════════════════════════════════════════
+   AUTO-SCROLL TO ACTIVE NODE  (horizontal)
+═══════════════════════════════════════════════════════ */
+/* Sync lane-headers vertical scroll to match SVG viewport */
+(function () {
+  function sync() {
+    const vp  = document.getElementById('flowchart-viewport');
+    const hdr = document.getElementById('lane-headers');
+    if (vp && hdr) hdr.scrollTop = vp.scrollTop;
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    const vp = document.getElementById('flowchart-viewport');
+    if (vp) vp.addEventListener('scroll', sync, { passive: true });
+  });
+})();
+
+function scrollToNode(node) {
+  const viewport = document.getElementById('flowchart-viewport');
+  const svg      = document.getElementById('flowchart-svg');
+  if (!viewport || !svg) return;
+
+  // SVG coordinate → pixel position inside the scrollable viewport
+  const vbW    = parseFloat(svg.getAttribute('width'))  || svg.getBoundingClientRect().width;
+  const vbH    = parseFloat(svg.getAttribute('height')) || svg.getBoundingClientRect().height;
+  const scaleX = vbW > 0 ? svg.getBoundingClientRect().width  / vbW : 1;
+  const scaleY = vbH > 0 ? svg.getBoundingClientRect().height / vbH : 1;
+
+  // Node center in scroll-space = scrollLeft + (node px position relative to viewport left)
+  const svgLeft = svg.getBoundingClientRect().left - viewport.getBoundingClientRect().left + viewport.scrollLeft;
+  const svgTop  = svg.getBoundingClientRect().top  - viewport.getBoundingClientRect().top  + viewport.scrollTop;
+
+  const nodePxX = svgLeft + nodeCX(node.svgCol) * scaleX;
+  const nodePxY = svgTop  + nodeCY(node.lane)   * scaleY;
+
+  viewport.scrollTo({
+    left: nodePxX - viewport.clientWidth  / 2,
+    top:  nodePxY - viewport.clientHeight / 2,
+    behavior: 'smooth'
+  });
+}
+
+
+/* ═══════════════════════════════════════════════════════
+   REVEAL LOGIC
+═══════════════════════════════════════════════════════ */
+/* Helper: show a single node + its outgoing arrows without affecting revealedCount */
+function showNodeAndArrows(node, animate) {
+  const nodeEl = document.getElementById(`node-${node.step_id}`);
+  if (nodeEl) {
+    nodeEl.style.opacity = '';
+    if (animate) nodeEl.classList.add('anim-node-in');
+  }
+  ['yes', 'no'].forEach(t => {
+    const arrEl = document.getElementById(`arrow-${node.step_id}-${t}`);
+    if (arrEl) { arrEl.style.opacity = ''; if (animate) arrEl.classList.add('anim-arrow-in'); }
+  });
+}
+
+function revealNext() {
+  if (revealedCount >= revealOrder.length) { stopPlay(); return false; }
+
+  const node = revealOrder[revealedCount];
+  revealedCount++;
+
+  // Show this node + its outgoing arrows
+  showNodeAndArrows(node, true);
+
+  // Highlight current node
+  document.querySelectorAll('.flow-node.node-active').forEach(el => el.classList.remove('node-active'));
+  const nodeEl = document.getElementById(`node-${node.step_id}`);
+  if (nodeEl) nodeEl.classList.add('node-active');
+
+  scrollToNode(node);
+  showDetailPanel(node);
+  updateProgress();
+  updateControls();
+
+  if (revealedCount >= revealOrder.length) stopPlay();
+  return true;
+}
+
+function revealPrev() {
+  if (revealedCount <= 0) return;
+  // Hide current node and re-hide its arrows
+  if (revealedCount > 0) {
+    revealedCount--;
+    const node = revealOrder[revealedCount];
+    const nodeEl = document.getElementById(`node-${node.step_id}`);
+    if (nodeEl) { nodeEl.style.opacity = '0'; nodeEl.classList.remove('anim-node-in', 'node-active'); }
+    ['yes', 'no'].forEach(t => {
+      const arrEl = document.getElementById(`arrow-${node.step_id}-${t}`);
+      if (arrEl) { arrEl.style.opacity = '0'; arrEl.classList.remove('anim-arrow-in'); }
+    });
+  }
+  // Re-highlight previous
+  if (revealedCount > 0) {
+    const prev = revealOrder[revealedCount - 1];
+    const prevEl = document.getElementById(`node-${prev.step_id}`);
+    if (prevEl) prevEl.classList.add('node-active');
+    scrollToNode(prev);
+    showDetailPanel(prev);
+  } else {
+    showDetailPanel(null);
+  }
+  updateProgress();
+  updateControls();
+}
+
+function resetAll() {
+  stopPlay();
+  revealedCount = 0;
+  // Re-render SVG completely so all elements are fresh with opacity:0.
+  // Trying to remove/re-add CSS animation classes on SVG <g> elements doesn't
+  // reliably restart animations because SVG lacks offsetWidth for forced reflow.
+  renderFlowchart(currentNodes);
+  // Scroll back to the start
+  const viewport = document.getElementById('flowchart-viewport');
+  if (viewport) viewport.scrollTo({ left: 0, top: 0, behavior: 'smooth' });
+  showDetailPanel(null);
+  updateProgress();
+  updateControls();
+}
+
+/* ═══════════════════════════════════════════════════════
+   AUTO-PLAY
+═══════════════════════════════════════════════════════ */
+function startPlay() {
+  if (revealedCount >= revealOrder.length) resetAll();
+  isPlaying = true;
+  document.getElementById('playBtn').textContent = '⏸ Pause';
+  document.getElementById('playBtn').classList.replace('btn-primary', 'btn-ghost');
+  tick();
+}
+
+function tick() {
+  if (!isPlaying) return;
+  const speed = parseInt(document.getElementById('speedSlider').value);
+  const delay = SPEED_MAP[speed] || 1100;
+  playTimer = setTimeout(() => {
+    const more = revealNext();
+    if (more && isPlaying) tick();
+    else stopPlay();
+  }, revealedCount === 0 ? 0 : delay);
+}
+
+function stopPlay() {
+  isPlaying = false;
+  clearTimeout(playTimer);
+  document.getElementById('playBtn').textContent = '▶ Auto Play';
+  document.getElementById('playBtn').classList.replace('btn-ghost', 'btn-primary');
+}
+
+/* ═══════════════════════════════════════════════════════
+   UI UPDATES
+═══════════════════════════════════════════════════════ */
+function updateProgress() {
+  const total = revealOrder.length;
+  // Effective count: subtract pre-revealed nodes (they were shown as part of a DECISION step)
+  const effective = Math.min(revealedCount, total);
+  const pct = total ? (effective / total) * 100 : 0;
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-label').textContent = `${effective} / ${total}`;
+}
+
+function updateControls() {
+  const total = revealOrder.length;
+  document.getElementById('prevBtn').disabled = revealedCount <= 0;
+  document.getElementById('nextBtn').disabled = revealedCount >= total;
+}
+
+function showDetailPanel(node) {
+  const panel = document.getElementById('step-detail');
+  if (!node) {
+    panel.innerHTML = '<div class="detail-placeholder">Select a step in the flowchart or press Next to begin.</div>';
+    return;
+  }
+  const c = NODE_COLORS[node.type] || NODE_COLORS.PROCESS;
+  const typeName = c.label;
+  panel.innerHTML = `
+    <div class="detail-badge" style="background:${c.fill};">${node.step_id}</div>
+    <div class="detail-body">
+      <div class="detail-name">${escHtml(node.name)}</div>
+      <div class="detail-desc">${escHtml(node.desc) || '<em style="opacity:0.5">No description provided.</em>'}</div>
+      <div class="detail-meta">
+        <div class="meta-chip">🏷️ ${typeName}</div>
+        ${node.role ? `<div class="meta-chip">👤 ${escHtml(node.role)}</div>` : ''}
+        ${node.notes ? `<div class="meta-chip">📝 ${escHtml(node.notes)}</div>` : ''}
+        ${node.link  ? `<div class="meta-chip" style="cursor:pointer" onclick="window.open(node.link,'_blank')">🔗 Open Document</div>` : ''}
+      </div>
+    </div>`;
+}
+
+function escHtml(str) {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/* ═══════════════════════════════════════════════════════
+   DEMO AUTOLOAD — runs on page open, loads shipping_goods_demo.json
+═══════════════════════════════════════════════════════ */
+function loadDemoJSON(data) {
+  // Build a pseudo-workbook from the JSON so existing pipeline works unchanged
+  const steps = data.steps;
+
+  // Inject into current session as a virtual topic
+  topics = [data.topic];
+  wb = {
+    SheetNames: [data.topic],
+    Sheets: {} // not used — we bypass parseSheet for demo
+  };
+
+  // Override selectTopic to use JSON data directly for the demo topic
+  window._demoSteps = steps;
+  window._demoTopic = data.topic;
+
+  renderSidebar();
+
+  // Build layout directly from JSON steps
+  buildLaneDefs(steps);
+  currentNodes  = buildLayout(steps);
+  revealOrder   = buildRevealOrder(currentNodes);
+  revealedCount = 0;
+  renderFlowchart(currentNodes);
+  updateProgress();
+  updateControls();
+  showDetailPanel(null);
+
+  document.getElementById('topic-title').textContent = data.topic;
+  document.getElementById('welcome-screen').style.display = 'none';
+  document.getElementById('flowchart-screen').classList.add('visible');
+
+  // Auto-play after short delay
+  setTimeout(() => startPlay(), 800);
+}
+
+
+// Demo data embedded directly — works on file:// with no server needed
+const DEMO_DATA = {"topic":"Shipping Goods","description":"Work process for shipping goods — Suzuyo DC (Thailand)","steps":[{"step_id":1,"name":"Send Delivery Instruction and concern documents","description":"Send DI and all supporting documents to warehouse","role":"Customer","type":"DOCUMENT","next_yes":2,"next_no":null,"notes":"","link":""},{"step_id":2,"name":"Check Stock In Cargo Master","description":"Verify stock availability against delivery instruction","role":"Warehouse Officer","type":"PROCESS","next_yes":3,"next_no":null,"notes":"","link":""},{"step_id":3,"name":"Stock Available ?","description":"Is sufficient stock available in the system?","role":"Warehouse Officer","type":"DECISION","next_yes":5,"next_no":4,"notes":"","link":""},{"step_id":4,"name":"Consider and instruction to Warehouse Officer","description":"Customer re-instructs based on stock status","role":"Customer","type":"PROCESS","next_yes":5,"next_no":null,"notes":"","link":""},{"step_id":5,"name":"Issue Picking Report","description":"Issue picking report to picker","role":"Warehouse Officer","type":"DOCUMENT","next_yes":6,"next_no":null,"notes":"","link":"C:\\FlowChart\\Document1.pdf"},{"step_id":6,"name":"* Picking Cargo as Per Picking Report","description":"Picker picks cargo strictly per picking report","role":"Operation","type":"PROCESS","next_yes":7,"next_no":null,"notes":"","link":""},{"step_id":7,"name":"Picker Check Cargoes condition, Details","description":"Check quantity, condition and item codes","role":"Operation","type":"PROCESS","next_yes":8,"next_no":null,"notes":"","link":""},{"step_id":8,"name":"Correct ?","description":"Are picked cargo details correct?","role":"Operation","type":"DECISION","next_yes":10,"next_no":9,"notes":"","link":""},{"step_id":9,"name":"Re-check","description":"Officer reviews and re-checks the picking","role":"Warehouse Officer","type":"PROCESS","next_yes":10,"next_no":null,"notes":"","link":""},{"step_id":10,"name":"Correct?","description":"Is picking correct after re-check?","role":"Warehouse Officer","type":"DECISION","next_yes":12,"next_no":11,"notes":"","link":""},{"step_id":11,"name":"Consider and Instruction to Warehouse Officer","description":"Customer acknowledges and re-instructs officer","role":"Customer","type":"PROCESS","next_yes":12,"next_no":null,"notes":"","link":""},{"step_id":12,"name":"Move Cargoes To Preparing Area","description":"Transfer correct cargo to staging area","role":"Operation","type":"PROCESS","next_yes":13,"next_no":null,"notes":"","link":""},{"step_id":13,"name":"* Checker Check Cargoes condition, Details","description":"Checker independently verifies cargo","role":"Operation","type":"PROCESS","next_yes":14,"next_no":null,"notes":"","link":""},{"step_id":14,"name":"Check Cargoes condition, Details by Checker","description":"Full condition and detail check by checker","role":"Operation","type":"PROCESS","next_yes":15,"next_no":null,"notes":"","link":""},{"step_id":15,"name":"Correct ?","description":"Is cargo correct per checker inspection?","role":"Operation","type":"DECISION","next_yes":17,"next_no":16,"notes":"","link":""},{"step_id":16,"name":"Inform Checker To Change the Cargoes","description":"Instruct picker to replace incorrect items","role":"Operation","type":"PROCESS","next_yes":17,"next_no":null,"notes":"","link":""},{"step_id":17,"name":"Return Picking Report To Officer","description":"Return to officer for DN issuance","role":"Operation","type":"DOCUMENT","next_yes":18,"next_no":null,"notes":"","link":""},{"step_id":18,"name":"Issue DN and send concern documents To checker","description":"Issue Delivery Note and send all documents to checker","role":"Warehouse Officer","type":"DOCUMENT","next_yes":19,"next_no":null,"notes":"","link":"C:\\FlowChart\\Document1.pdf"},{"step_id":19,"name":"Wait For Load To Truck","description":"Await truck arrival confirmation","role":"Operation","type":"DOCUMENT","next_yes":20,"next_no":null,"notes":"","link":""},{"step_id":20,"name":"Truck Arrival","description":"Truck arrives at warehouse dock","role":"Operation","type":"PROCESS","next_yes":21,"next_no":null,"notes":"","link":""},{"step_id":21,"name":"Leader Check Truck License Plate With Document","description":"Verify license plate against delivery document","role":"Operation","type":"PROCESS","next_yes":22,"next_no":null,"notes":"","link":""},{"step_id":22,"name":"Correct ?","description":"Does truck license plate match the document?","role":"Operation","type":"DECISION","next_yes":25,"next_no":23,"notes":"","link":""},{"step_id":23,"name":"Inform Customer","description":"Notify customer of wrong truck","role":"Warehouse Officer","type":"PROCESS","next_yes":24,"next_no":null,"notes":"","link":""},{"step_id":24,"name":"Consider and Instruction to Warehouse Officer","description":"Customer instructs on corrective action","role":"Customer","type":"PROCESS","next_yes":25,"next_no":null,"notes":"","link":""},{"step_id":25,"name":"Load Cargo To Truck","description":"Begin loading under dock audit supervision","role":"Operation","type":"PROCESS","next_yes":26,"next_no":null,"notes":"","link":""},{"step_id":26,"name":"Dock Audit By Checker Leader","description":"Checker leader supervises loading","role":"Operation","type":"PROCESS","next_yes":27,"next_no":null,"notes":"","link":""},{"step_id":27,"name":"Take Photos of Each Cargo During Loading","description":"Photo evidence per cargo item during loading","role":"Operation","type":"PROCESS","next_yes":28,"next_no":null,"notes":"","link":""},{"step_id":28,"name":"Repeat Until Complete Loading","description":"Continue loading cycle until all cargo loaded","role":"Operation","type":"PROCESS","next_yes":29,"next_no":null,"notes":"","link":""},{"step_id":29,"name":"Take Photos Cargoes on Truck and License Plate","description":"Final photo of fully loaded truck with license plate","role":"Operation","type":"PROCESS","next_yes":30,"next_no":null,"notes":"","link":""},{"step_id":30,"name":"Sign for Check by Checker Sign for Delivery by Truck Driver","description":"Checker and driver both sign the Delivery Note","role":"Operation","type":"DOCUMENT","next_yes":31,"next_no":null,"notes":"","link":""},{"step_id":31,"name":"Return 1 Copy of DN to Officer","description":"File one signed copy at warehouse","role":"Warehouse Officer","type":"DOCUMENT","next_yes":32,"next_no":null,"notes":"","link":""},{"step_id":32,"name":"The rest Copies of DN Give To Truck Driver to Bring with Cargoes","description":"Remaining DN copies go with driver","role":"Operation","type":"DOCUMENT","next_yes":33,"next_no":null,"notes":"","link":""},{"step_id":33,"name":"Truck Delivery The Cargoes To Destination","description":"Truck departs and delivers to consignee","role":"Operation","type":"PROCESS","next_yes":34,"next_no":null,"notes":"","link":""},{"step_id":34,"name":"Return the DN, Invoice with sign of Receiver To Officer","description":"Signed proof of delivery returned to officer","role":"Operation","type":"DOCUMENT","next_yes":35,"next_no":null,"notes":"","link":""},{"step_id":35,"name":"Entry Data To CargoMaster","description":"Record delivery completion in CargoMaster system","role":"Warehouse Officer","type":"DOCUMENT","next_yes":36,"next_no":null,"notes":"","link":""},{"step_id":36,"name":"Return Copies of Invoice to Customer","description":"Send invoice copies to customer as confirmation","role":"Warehouse Officer","type":"DOCUMENT","next_yes":37,"next_no":null,"notes":"","link":""},{"step_id":37,"name":"Completed","description":"Shipping process complete. All documents filed.","role":"Customer","type":"END","next_yes":null,"next_no":null,"notes":"","link":""}]};
+
+document.addEventListener('DOMContentLoaded', function () {
+  loadDemoJSON(DEMO_DATA);
+});
+
+/* ═══════════════════════════════════════════════════════
+   BUTTON WIRING
+═══════════════════════════════════════════════════════ */
+document.getElementById('nextBtn').addEventListener('click', () => { stopPlay(); revealNext(); });
+document.getElementById('prevBtn').addEventListener('click', () => { stopPlay(); revealPrev(); });
+document.getElementById('resetBtn').addEventListener('click', resetAll);
+document.getElementById('playBtn').addEventListener('click', () => {
+  if (isPlaying) stopPlay(); else startPlay();
+});
+
+/* ─── Keyboard shortcuts ───────── */
+document.addEventListener('keydown', e => {
+  if (!document.getElementById('flowchart-screen').classList.contains('visible')) return;
+  if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); stopPlay(); revealNext(); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); stopPlay(); revealPrev(); }
+  if (e.key === 'r' || e.key === 'R') resetAll();
+  if (e.key === 'p' || e.key === 'P') { if (isPlaying) stopPlay(); else startPlay(); }
+});
+
+/* ═══════════════════════════════════════════════════════
+   THEME TOGGLE
+═══════════════════════════════════════════════════════ */
+(function() {
+  const btn = document.getElementById('themeToggle');
+  const root = document.documentElement;
+  let saved = 'dark';
+
+  function applyTheme(t) {
+    if (t === 'dark') {
+      root.setAttribute('data-theme', 'dark');
+      btn.classList.add('on');
+
+    } else {
+      root.setAttribute('data-theme', 'light');
+      btn.classList.remove('on');
+
+    }
+
+  }
+
+  btn.addEventListener('click', () => {
+    const current = root.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+    applyTheme(current === 'dark' ? 'light' : 'dark');
+  });
+
+  applyTheme(saved);
+})();
+
+</script>
+
+<script>
+/* ═══════════════════════════════════════════════════════
+   THEME TOGGLE  (runs after DOM is ready)
+═══════════════════════════════════════════════════════ */
+document.addEventListener('DOMContentLoaded', function() {
+  const btn  = document.getElementById('themeToggle');
+  const root = document.documentElement;
+  let saved = 'dark';
+
+  function applyTheme(t) {
+    if (t === 'dark') {
+      root.setAttribute('data-theme', 'dark');
+      btn.classList.add('on');
+
+    } else {
+      root.setAttribute('data-theme', 'light');
+      btn.classList.remove('on');
