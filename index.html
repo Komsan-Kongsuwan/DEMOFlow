@@ -320,7 +320,15 @@ const XLSX = (function () {
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    border-right: 1px solid var(--sidebar-border); transition: background 0.3s, border-color 0.3s;
+    border-right: 1px solid var(--sidebar-border);
+    transition: background 0.3s, border-color 0.3s, width 0.4s ease, min-width 0.4s ease, opacity 0.3s ease;
+  }
+  #sidebar.hidden-sidebar {
+    width: 0 !important;
+    min-width: 0 !important;
+    opacity: 0;
+    overflow: hidden;
+    border-right: none;
   }
   .sidebar-header {
     padding: 24px 20px 18px;
@@ -373,6 +381,7 @@ const XLSX = (function () {
   }
   .topic-icon { font-size: 15px; flex-shrink: 0; }
   .topic-label { flex: 1; line-height: 1.3; }
+
   .sidebar-footer {
     padding: 14px 20px; border-top: 1px solid var(--sidebar-header-border);
     color: var(--sidebar-footer-color); font-size: 11px;
@@ -481,10 +490,15 @@ const XLSX = (function () {
   }
   .lane-header-cell {
     display: flex; align-items: center; justify-content: center;
-    font-size: 13px; font-weight: 700;
-    color: #fff; text-align: center;
-    padding: 0 8px;
+    font-size: 12px; font-weight: 600;
+    color: rgba(255,255,255,0.92); text-align: center;
+    padding: 0 4px;
     box-sizing: border-box;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    transform: rotate(180deg);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
   }
   /* Scrollable SVG area */
   #flowchart-viewport {
@@ -580,10 +594,8 @@ const XLSX = (function () {
     from { opacity: 0; transform: scale(0.6); }
     to   { opacity: 1; transform: scale(1); }
   }
-  @keyframes arrowIn {
-    from { opacity: 0; stroke-dashoffset: 200; }
-    to   { opacity: 1; stroke-dashoffset: 0; }
-  }
+  /* arrowIn is handled by JS using getTotalLength() */
+  .anim-arrow-in { /* marker class only — animation done in JS */ }
   #pdf-list {
     padding: 4px 2px 0;
     font-size: 11px;
@@ -593,16 +605,70 @@ const XLSX = (function () {
   }
   .pdf-item {
     display: flex; align-items: center; gap: 5px;
-    padding: 2px 0; white-space: nowrap;
-    overflow: hidden; text-overflow: ellipsis;
+    padding: 2px 0; overflow: hidden;
   }
   .pdf-item span { color: #10b981; flex-shrink: 0; }
 
+  /* ── PDF Viewer Modal ─────────────────────────── */
+  #pdf-modal {
+    display: none;
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(0,0,0,0.75);
+    backdrop-filter: blur(4px);
+    align-items: center; justify-content: center;
+  }
+  #pdf-modal.open { display: flex; }
+  #pdf-modal-box {
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 90vw; height: 90vh;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+  }
+  #pdf-modal-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    background: var(--panel-bg);
+  }
+  #pdf-modal-title {
+    font-size: 13px; font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: calc(90vw - 120px);
+  }
+  #pdf-modal-close {
+    background: transparent; border: none; cursor: pointer;
+    font-size: 20px; color: var(--text-muted); line-height: 1;
+    padding: 2px 6px; border-radius: 4px;
+  }
+  #pdf-modal-close:hover { background: var(--btn-ghost-hover-bg); color: var(--text-primary); }
+  #pdf-modal-frame {
+    flex: 1; width: 100%; border: none;
+    background: #525659;
+  }
+  #pdf-modal-img {
+    flex: 1; display: none;
+    object-fit: contain; width: 100%; height: 100%;
+    background: #1a1a2e; padding: 16px;
+  }
+  #pdf-modal-fallback {
+    flex: 1; display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px;
+    color: var(--text-muted); text-align: center; padding: 40px;
+  }
+  #pdf-modal-fallback .fb-icon { font-size: 48px; }
+  #pdf-modal-fallback p { font-size: 14px; line-height: 1.6; max-width: 380px; }
+  #pdf-modal-fallback a {
+    padding: 10px 24px; background: var(--accent); color: #fff;
+    border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 13px;
+  }
+
   .anim-node-in {
     animation: nodeIn 0.45s cubic-bezier(0.34,1.56,0.64,1) forwards;
-  }
-  .anim-arrow-in {
-    animation: arrowIn 0.4s ease forwards;
   }
 </style>
 </head>
@@ -623,9 +689,9 @@ const XLSX = (function () {
         <input type="file" id="fileInput" accept=".xlsx,.xls">
         📂 Load Excel File
       </label>
-      <label class="upload-btn" id="pdfUploadLabel" style="margin-top:8px;" title="Upload PDF reference documents linked in your flowchart">
-        <input type="file" id="pdfInput" accept=".pdf" multiple>
-        📄 Upload Reference PDF
+      <label class="upload-btn" id="pdfUploadLabel" style="margin-top:8px;" title="Upload PDF, JPG, PNG or other reference documents">
+        <input type="file" id="pdfInput" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.bmp,.svg" multiple>
+        📄 Upload Reference Docs
       </label>
       <div id="pdf-list"></div>
       <div id="pdf-upload-msg" style="display:none;font-size:11px;color:#f59e0b;padding:4px 2px;line-height:1.4;"></div>
@@ -692,6 +758,8 @@ const XLSX = (function () {
           <button class="btn btn-ghost" id="nextBtn">Next →</button>
           <button class="btn btn-primary btn-play" id="playBtn">▶ Auto Play</button>
           <div class="divider"></div>
+          <button class="btn btn-ghost" id="exportPdfBtn" title="Export as PDF (A4 Landscape)">⬇ Export PDF</button>
+          <div class="divider"></div>
           <div class="speed-wrap">
             Speed
             <input type="range" id="speedSlider" min="1" max="5" value="3">
@@ -722,6 +790,24 @@ const XLSX = (function () {
     </div>
 
   </main>
+
+  <!-- ── PDF Viewer Modal ──────────────────────── -->
+  <div id="pdf-modal">
+    <div id="pdf-modal-box">
+      <div id="pdf-modal-bar">
+        <span id="pdf-modal-title">Document</span>
+        <button id="pdf-modal-close" title="Close">✕</button>
+      </div>
+      <iframe id="pdf-modal-frame" src="about:blank"></iframe>
+      <img id="pdf-modal-img" src="" alt="Document" />
+      <div id="pdf-modal-fallback">
+        <div class="fb-icon">📄</div>
+        <p>This document cannot be previewed in the browser.<br>Click below to open it in a new tab.</p>
+        <a id="pdf-modal-fallback-link" href="#" target="_blank">Open Document</a>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
@@ -730,10 +816,10 @@ const XLSX = (function () {
    Lanes = horizontal rows · Flow = left → right
 ═══════════════════════════════════════════════════════ */
 const LANE_H    = 160;   // height of each swimlane row
-const HEADER_W  = 110;   // left lane-label strip width
+const HEADER_W  = 40;    // left lane-label strip width — narrow for vertical text
 const COL_W     = 210;   // horizontal distance between node centres
 const NW = 155, NH = 58; // node width / height
-const PAD_L     = 30;    // padding before first column
+const PAD_L     = 82;    // gap between lane header and first node
 const PAD_R     = 50;    // padding after last column
 const MARGIN    = 22;    // clearance outside lanes for No routing
 const DIAMOND_HW = NW / 2 + 10;
@@ -989,11 +1075,11 @@ function renderFlowchart(nodes) {
   svg.setAttribute('height',  svgH);
 
   // Auto-generate lane colors for any number of lanes
-  const PALETTE = ['#10b981','#4f6ef7','#f59e0b','#e05c2a','#7c5cbf','#0ea5e9','#ec4899','#84cc16'];
+  const PALETTE = ['#4a9e7f','#5a72c7','#b07d2e','#b05540','#7a5ab0','#3a8ab0','#b04880','#6a9e30'];
   const laneColors    = LANE_DEFS.map((_,i) => {
     const hex = PALETTE[i % PALETTE.length];
     const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
-    return `rgba(${r},${g},${b},0.07)`;
+    return `rgba(${r},${g},${b},0.05)`;
   });
   const laneHdrColors = LANE_DEFS.map((_,i) => PALETTE[i % PALETTE.length]);
 
@@ -1014,7 +1100,10 @@ function renderFlowchart(nodes) {
     cell.className        = 'lane-header-cell';
     cell.style.height     = LANE_H + 'px';
     cell.style.minHeight  = LANE_H + 'px';
-    cell.style.background = laneHdrColors[l];
+    // Convert hex to rgba with reduced opacity for softer look
+    const hx = laneHdrColors[l];
+    const hr = parseInt(hx.slice(1,3),16), hg = parseInt(hx.slice(3,5),16), hb = parseInt(hx.slice(5,7),16);
+    cell.style.background = `rgba(${hr},${hg},${hb},0.72)`;
     cell.style.borderBottom = l < numLanes-1 ? '1px solid rgba(255,255,255,0.25)' : 'none';
     cell.textContent = LANE_DEFS[l].label;
     hdrDiv.appendChild(cell);
@@ -1260,11 +1349,12 @@ function buildArrow(from, to, type, nodeMap) {
     ].join(' ');
   }
 
-  g.appendChild(svgEl('path', {
+  const arrowPath = svgEl('path', {
     d: pathD, stroke: color, 'stroke-width': '2',
     fill: 'none', 'marker-end': marker,
     'stroke-dasharray': isNo ? '6 3' : 'none'
-  }));
+  });
+  g.appendChild(arrowPath);
 
   // Yes / No label
   if (from.type === 'DECISION') {
@@ -1334,6 +1424,34 @@ function scrollToNode(node) {
    REVEAL LOGIC
 ═══════════════════════════════════════════════════════ */
 /* Helper: show a single node + its outgoing arrows without affecting revealedCount */
+function drawArrowPath(path, isNo, duration) {
+  // Get real pixel length of this specific path
+  const len = path.getTotalLength();
+  // Start: fully hidden (dasharray = len, offset = len)
+  path.style.transition = 'none';
+  path.setAttribute('stroke-dasharray', len);
+  path.setAttribute('stroke-dashoffset', len);
+  // Force reflow so the browser registers the starting state
+  void path.getBoundingClientRect();
+  // Animate to dashoffset=0 (fully drawn)
+  path.style.transition = `stroke-dashoffset ${duration}ms cubic-bezier(0.4,0,0.2,1)`;
+  path.setAttribute('stroke-dashoffset', 0);
+  // After draw completes, restore dashed style for No arrows
+  if (isNo) {
+    setTimeout(() => {
+      path.style.transition = 'none';
+      path.setAttribute('stroke-dasharray', '6 3');
+      path.setAttribute('stroke-dashoffset', 0);
+    }, duration + 20);
+  } else {
+    setTimeout(() => {
+      path.style.transition = 'none';
+      path.removeAttribute('stroke-dasharray');
+      path.removeAttribute('stroke-dashoffset');
+    }, duration + 20);
+  }
+}
+
 function showNodeAndArrows(node, animate) {
   const nodeEl = document.getElementById(`node-${node.step_id}`);
   if (nodeEl) {
@@ -1342,7 +1460,14 @@ function showNodeAndArrows(node, animate) {
   }
   ['yes', 'no'].forEach(t => {
     const arrEl = document.getElementById(`arrow-${node.step_id}-${t}`);
-    if (arrEl) { arrEl.style.opacity = ''; if (animate) arrEl.classList.add('anim-arrow-in'); }
+    if (arrEl) {
+      arrEl.style.opacity = '';
+      if (animate) {
+        const path = arrEl.querySelector('path');
+        if (path) drawArrowPath(path, t === 'no', 600);
+        else arrEl.classList.add('anim-arrow-in');
+      }
+    }
   });
 }
 
@@ -1414,11 +1539,19 @@ function resetAll() {
 /* ═══════════════════════════════════════════════════════
    AUTO-PLAY
 ═══════════════════════════════════════════════════════ */
+function sidebarHide() {
+  document.getElementById('sidebar').classList.add('hidden-sidebar');
+}
+function sidebarShow() {
+  document.getElementById('sidebar').classList.remove('hidden-sidebar');
+}
+
 function startPlay() {
   if (revealedCount >= revealOrder.length) resetAll();
   isPlaying = true;
   document.getElementById('playBtn').textContent = '⏸ Pause';
   document.getElementById('playBtn').classList.replace('btn-primary', 'btn-ghost');
+  sidebarHide();
   tick();
 }
 
@@ -1438,6 +1571,7 @@ function stopPlay() {
   clearTimeout(playTimer);
   document.getElementById('playBtn').textContent = '▶ Auto Play';
   document.getElementById('playBtn').classList.replace('btn-ghost', 'btn-primary');
+  sidebarShow();
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1555,41 +1689,219 @@ function renderPdfList() {
   const keys = Object.keys(pdfStore);
   if (!keys.length) { div.innerHTML = ''; return; }
   div.innerHTML = keys.map(k =>
-    `<div class="pdf-item"><span>✓</span><span title="${k}" style="overflow:hidden;text-overflow:ellipsis;">${k}</span></div>`
+    `<div class="pdf-item">
+      <span style="color:#10b981;flex-shrink:0">✓</span>
+      <span title="${k}" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${k}</span>
+      <button onclick="removePdfFile('${k}')" title="Remove" style="
+        background:transparent;border:none;cursor:pointer;
+        color:var(--text-muted);font-size:13px;padding:0 2px;
+        flex-shrink:0;line-height:1;
+      " onmouseover="this.style.color='#ef4444'" onmouseout="this.style.color=''">✕</button>
+    </div>`
   ).join('');
+}
+
+function removePdfFile(key) {
+  if (pdfStore[key]) URL.revokeObjectURL(pdfStore[key]);
+  delete pdfStore[key];
+  renderPdfList();
 }
 
 function openLink(link) {
   if (!link) return;
   const url = link.trim();
-
-  // Extract just the filename from any path style
   const filename = url.split(/[\/\\]/).pop().toLowerCase();
 
-  // 1. Check in-memory PDF store (user uploaded via sidebar)
+  // Resolve URL: pdfStore first, then https, then relative
+  let resolvedUrl = null;
   if (pdfStore[filename]) {
-    window.open(pdfStore[filename], '_blank');
-    return;
+    resolvedUrl = pdfStore[filename];
+  } else if (/^https?:\/\//i.test(url)) {
+    resolvedUrl = url;
+  } else if (!/^[a-zA-Z]:[\\/]/.test(url) && !/^\\\\/.test(url)) {
+    resolvedUrl = url.replace(/\\/g, '/'); // relative path
   }
 
-  // 2. Direct http/https URL — open immediately
-  if (/^https?:\/\//i.test(url)) {
-    window.open(url, '_blank');
-    return;
+  if (resolvedUrl) {
+    showPdfModal(resolvedUrl, filename);
+  } else {
+    // Local Windows path — file not uploaded yet
+    const msg = document.getElementById('pdf-upload-msg');
+    if (msg) {
+      msg.textContent = '⬆ Please upload "' + filename + '" using the button above.';
+      msg.style.display = 'block';
+      const btn = document.getElementById('pdfUploadLabel');
+      if (btn) {
+        btn.style.borderColor = '#f59e0b'; btn.style.color = '#f59e0b';
+        setTimeout(() => { btn.style.borderColor = ''; btn.style.color = ''; }, 3000);
+      }
+      setTimeout(() => { msg.style.display = 'none'; }, 5000);
+    }
+  }
+}
+
+function showPdfModal(url, filename) {
+  const modal    = document.getElementById('pdf-modal');
+  const frame    = document.getElementById('pdf-modal-frame');
+  const imgEl    = document.getElementById('pdf-modal-img');
+  const fallback = document.getElementById('pdf-modal-fallback');
+  const title    = document.getElementById('pdf-modal-title');
+  const fbLink   = document.getElementById('pdf-modal-fallback-link');
+
+  title.textContent = filename || 'Document';
+  fbLink.href = url;
+
+  // Detect if it's an image by extension
+  const isImage = /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(filename);
+
+  // Reset all viewers
+  frame.style.display    = 'none';
+  imgEl.style.display    = 'none';
+  fallback.style.display = 'none';
+  frame.src = 'about:blank';
+  imgEl.src = '';
+
+  if (isImage) {
+    // Show image viewer
+    imgEl.style.display = 'block';
+    imgEl.src = url;
+    imgEl.onerror = () => {
+      imgEl.style.display = 'none';
+      fallback.style.display = 'flex';
+    };
+  } else {
+    // Show iframe (PDF or other document)
+    frame.style.display = 'block';
+    frame.onerror = () => {
+      frame.style.display = 'none';
+      fallback.style.display = 'flex';
+    };
+    frame.src = url;
   }
 
-  // 3. Local / Windows path — cannot open directly from browser
-  // Show a friendly prompt asking user to upload the file
-  const msg = document.getElementById('pdf-upload-msg');
-  if (msg) {
-    msg.textContent = '⬆ Please upload "' + filename + '" using the button above.';
-    msg.style.display = 'block';
-    // Highlight the upload button
-    const btn = document.getElementById('pdfUploadLabel');
-    if (btn) { btn.style.borderColor = '#f59e0b'; btn.style.color = '#f59e0b';
-      setTimeout(() => { btn.style.borderColor = ''; btn.style.color = ''; }, 3000); }
-    setTimeout(() => { msg.style.display = 'none'; }, 5000);
+  modal.classList.add('open');
+  modal.onclick = (e) => { if (e.target === modal) closePdfModal(); };
+}
+
+function closePdfModal() {
+  const modal = document.getElementById('pdf-modal');
+  const frame = document.getElementById('pdf-modal-frame');
+  const imgEl = document.getElementById('pdf-modal-img');
+  modal.classList.remove('open');
+  frame.src   = 'about:blank';
+  imgEl.src   = '';
+}
+
+/* ═══════════════════════════════════════════════════════
+   EXPORT FLOWCHART AS PDF  (A4 landscape, browser print)
+═══════════════════════════════════════════════════════ */
+function exportPDF() {
+  const topicTitle = document.getElementById('topic-title').textContent || 'Flowchart';
+  const svg = document.getElementById('flowchart-svg');
+  if (!svg || !currentNodes.length) { alert('Please load a flowchart first.'); return; }
+
+  // ── Make all nodes/arrows visible in a clone ────────────────────────
+  const svgClone = svg.cloneNode(true);
+  svgClone.querySelectorAll('[style]').forEach(el => { el.style.opacity = '1'; });
+
+  const svgW = parseFloat(svg.getAttribute('width'))  || 800;
+  const svgH = parseFloat(svg.getAttribute('height')) || 400;
+
+  // ── Inject lane headers as SVG elements ─────────────────────────────
+  const PALETTE = ['#4a9e7f','#5a72c7','#b07d2e','#b05540','#7a5ab0','#3a8ab0','#b04880','#6a9e30'];
+  const hdrGroup = document.createElementNS('http://www.w3.org/2000/svg','g');
+  LANE_DEFS.forEach((lane, l) => {
+    const col = PALETTE[l % PALETTE.length];
+    const r=parseInt(col.slice(1,3),16), g=parseInt(col.slice(3,5),16), b=parseInt(col.slice(5,7),16);
+    const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    rect.setAttribute('x',0); rect.setAttribute('y',l*LANE_H);
+    rect.setAttribute('width',HEADER_W); rect.setAttribute('height',LANE_H);
+    rect.setAttribute('fill',`rgba(${r},${g},${b},0.72)`);
+    hdrGroup.appendChild(rect);
+    if (l > 0) {
+      const ln = document.createElementNS('http://www.w3.org/2000/svg','line');
+      ln.setAttribute('x1',0); ln.setAttribute('y1',l*LANE_H);
+      ln.setAttribute('x2',HEADER_W); ln.setAttribute('y2',l*LANE_H);
+      ln.setAttribute('stroke','rgba(255,255,255,0.25)'); ln.setAttribute('stroke-width','1');
+      hdrGroup.appendChild(ln);
+    }
+    const text = document.createElementNS('http://www.w3.org/2000/svg','text');
+    text.setAttribute('x',HEADER_W/2); text.setAttribute('y',l*LANE_H+LANE_H/2);
+    text.setAttribute('text-anchor','middle'); text.setAttribute('dominant-baseline','middle');
+    text.setAttribute('font-size','11'); text.setAttribute('font-weight','600');
+    text.setAttribute('font-family','Segoe UI, Arial, sans-serif');
+    text.setAttribute('fill','rgba(255,255,255,0.92)'); text.setAttribute('letter-spacing','1.5');
+    text.setAttribute('transform',`rotate(-90,${HEADER_W/2},${l*LANE_H+LANE_H/2})`);
+    text.textContent = lane.label.toUpperCase();
+    hdrGroup.appendChild(text);
+  });
+  svgClone.insertBefore(hdrGroup, svgClone.firstChild);
+  const SCALE = 1.4;
+  svgClone.setAttribute('width',  Math.round(svgW * SCALE));
+  svgClone.setAttribute('height', Math.round(svgH * SCALE));
+  svgClone.setAttribute('viewBox', `0 0 ${svgW} ${svgH}`);
+
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('en-GB', {day:'2-digit',month:'short',year:'numeric'});
+  const svgStr = new XMLSerializer().serializeToString(svgClone);
+
+  // ── Open preview page — scroll to see full chart, use browser Save as PDF ──
+  const win = window.open('', '_blank');
+  win.document.write(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>${topicTitle} — Demo Logistics</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #f5f6fa;
+    padding: 24px;
   }
+  .header {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    padding-bottom: 10px;
+    border-bottom: 3px solid #1f3864;
+    margin-bottom: 16px;
+    background: #fff;
+    padding: 16px 24px 10px;
+    border-radius: 8px 8px 0 0;
+  }
+  .company { font-size: 22px; font-weight: 800; color: #1f3864; }
+  .topic   { font-size: 13px; font-weight: 600; color: #4a5568; margin-top: 3px; }
+  .meta    { font-size: 11px; color: #9ca3af; text-align: right; line-height: 1.6; }
+  .chart   { background: #fff; border-radius: 0 0 8px 8px; overflow-x: auto; padding: 16px; }
+  svg      { display: block; }
+  .toolbar {
+    display: flex; gap: 10px; margin-bottom: 12px; align-items: center;
+  }
+  .btn {
+    padding: 8px 18px; border-radius: 6px; border: none; cursor: pointer;
+    font-size: 13px; font-weight: 600; font-family: 'Segoe UI', sans-serif;
+  }
+  .btn-primary { background: #1f3864; color: #fff; }
+  .btn-ghost   { background: #e5e7eb; color: #374151; }
+  .hint { font-size: 12px; color: #9ca3af; }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <button class="btn btn-primary" onclick="window.print()">🖨 Print / Save as PDF</button>
+  <button class="btn btn-ghost" onclick="window.close()">✕ Close</button>
+  <span class="hint">Tip: In print dialog → set paper to A3 Landscape or save as PDF</span>
+</div>
+<div class="header">
+  <div>
+    <div class="company">Demo Logistics</div>
+    <div class="topic">Work Process: ${topicTitle}</div>
+  </div>
+  <div class="meta">Date: ${dateStr}<br>DemoFlow — Work Process Viewer</div>
+</div>
+<div class="chart">${svgStr}</div>
+</body>
+</html>`);
+  win.document.close();
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1598,12 +1910,53 @@ function openLink(link) {
 document.getElementById('nextBtn').addEventListener('click', () => { stopPlay(); revealNext(); });
 document.getElementById('prevBtn').addEventListener('click', () => { stopPlay(); revealPrev(); });
 document.getElementById('resetBtn').addEventListener('click', resetAll);
+document.getElementById('pdf-modal-close').addEventListener('click', closePdfModal);
+document.getElementById('exportPdfBtn').addEventListener('click', exportPDF);
 document.getElementById('playBtn').addEventListener('click', () => {
   if (isPlaying) stopPlay(); else startPlay();
 });
 
 /* ─── Keyboard shortcuts ───────── */
+/* ═══════════════════════════════════════════════════════
+   TOUCH SWIPE  — left = next, right = prev
+   Ignores swipes on the PDF modal and scrollable areas.
+═══════════════════════════════════════════════════════ */
+(function() {
+  let tx = 0, ty = 0, dragging = false;
+  const SWIPE_MIN = 50;   // min px to register as swipe
+  const SWIPE_MAX = 120;  // max vertical drift allowed
+
+  document.addEventListener('touchstart', e => {
+    if (e.target.closest('#pdf-modal')) return;
+    tx = e.touches[0].clientX;
+    ty = e.touches[0].clientY;
+    dragging = true;
+  }, { passive: true });
+
+  document.addEventListener('touchend', e => {
+    if (!dragging) return;
+    dragging = false;
+    if (e.target.closest('#pdf-modal')) return;
+    if (!document.getElementById('flowchart-screen').classList.contains('visible')) return;
+
+    const dx = e.changedTouches[0].clientX - tx;
+    const dy = e.changedTouches[0].clientY - ty;
+
+    // Ignore if mostly vertical (user scrolling)
+    if (Math.abs(dy) > SWIPE_MAX) return;
+
+    if (dx < -SWIPE_MIN) {
+      // Swipe left → Next
+      stopPlay(); revealNext();
+    } else if (dx > SWIPE_MIN) {
+      // Swipe right → Prev
+      stopPlay(); revealPrev();
+    }
+  }, { passive: true });
+})();
+
 document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closePdfModal();
   if (!document.getElementById('flowchart-screen').classList.contains('visible')) return;
   if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); stopPlay(); revealNext(); }
   if (e.key === 'ArrowLeft') { e.preventDefault(); stopPlay(); revealPrev(); }
