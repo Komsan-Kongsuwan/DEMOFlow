@@ -507,7 +507,10 @@ const XLSX = (function () {
     background: var(--bg-content);
     display: block;
     padding: 0;
+    cursor: grab;
+    user-select: none;
   }
+  #flowchart-viewport.dragging { cursor: grabbing; }
   #flowchart-viewport::-webkit-scrollbar { height: 6px; width: 6px; }
   #flowchart-viewport::-webkit-scrollbar-track { background: transparent; }
   #flowchart-viewport::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 6px; }
@@ -573,16 +576,19 @@ const XLSX = (function () {
   .toggle-label { display: flex; align-items: center; gap: 7px; }
   .sidebar-footer-copy { color: var(--sidebar-footer-color); font-size: 11px; transition: color 0.3s; }
   .dev-credit {
-    padding: 10px 20px 16px;
+    padding: 14px 20px 16px;
     border-top: 1px solid var(--sidebar-header-border);
-    font-size: 11px;
-    color: var(--sidebar-footer-color);
-    line-height: 1.7;
+    font-size: 11.5px;
+    color: var(--sidebar-text);
+    line-height: 1.8;
     text-align: center;
-    transition: color 0.3s, border-color 0.3s;
   }
-  .dev-credit strong { color: var(--sidebar-text); font-size: 12px; display: block; margin-bottom: 2px; }
-  .dev-credit a { color: var(--sidebar-footer-color); text-decoration: none; }
+  .dev-credit strong {
+    font-size: 12px; font-weight: 700;
+    color: #fff;
+    display: block; margin-bottom: 2px;
+  }
+  .dev-credit a { color: var(--sidebar-text); text-decoration: none; }
   .dev-credit a:hover { color: var(--accent); }
 
   /* Node hover / active */
@@ -680,7 +686,26 @@ const XLSX = (function () {
   <aside id="sidebar">
     <div class="sidebar-header">
       <div class="logo">
-        <div class="logo-icon">⚡</div>
+        <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+  <rect width="36" height="36" rx="9" fill="#ede9fe"/>
+  <!-- Start pill -->
+  <rect x="11" y="3.5" width="14" height="5.5" rx="2.75" fill="#7c3aed"/>
+  <!-- Arrow down start → diamond -->
+  <line x1="18" y1="9" x2="18" y2="12" stroke="#7c3aed" stroke-width="1.4"/>
+  <polygon points="18,13.5 16.8,11.8 19.2,11.8" fill="#7c3aed"/>
+  <!-- Decision diamond -->
+  <polygon points="18,14 23,18 18,22 13,18" fill="#7c3aed"/>
+  <!-- Arrow yes → right box -->
+  <line x1="23" y1="18" x2="26" y2="18" stroke="#7c3aed" stroke-width="1.4"/>
+  <polygon points="27.5,18 25.8,16.8 25.8,19.2" fill="#7c3aed"/>
+  <!-- Process box right -->
+  <rect x="27.5" y="15" width="5.5" height="6" rx="1.2" fill="#7c3aed"/>
+  <!-- Arrow no → down process box -->
+  <line x1="18" y1="22" x2="18" y2="25" stroke="#7c3aed" stroke-width="1.4"/>
+  <polygon points="18,26.5 16.8,24.8 19.2,24.8" fill="#7c3aed"/>
+  <!-- Process box bottom -->
+  <rect x="11" y="26.5" width="14" height="6" rx="1.5" fill="#7c3aed"/>
+</svg>
         DemoFlow
         <div class="theme-toggle" style="margin-left:auto">
           <button class="toggle-pill" id="themeToggle" title="Toggle dark/light mode"></button>
@@ -702,9 +727,9 @@ const XLSX = (function () {
       <div class="no-topics">Load an Excel file to see work topics here.</div>
     </nav>
     <div class="dev-credit">
-      <strong>DemoFlow</strong>
+      <strong>DemoFlow</strong><br>
       Developed by Komsan Kongsuwan<br>
-      <a href="/cdn-cgi/l/email-protection#d7bcb8baa4b6b9f9bcb8b9b0a4a2a0b6b997b0bab6bebbf9b4b8ba"><span class="__cf_email__" data-cfemail="d0bbbfbda3b1befebbbfbeb7a3a5a7b1be90b7bdb1b9bcfeb3bfbd">[email&#160;protected]</span></a><br>
+      <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="365d595b455758185d595851454341575876515b575f5a1855595b">[email&#160;protected]</a><br>
       +66-81-723-9680
     </div>
   </aside>
@@ -776,6 +801,7 @@ const XLSX = (function () {
       <div id="step-detail">
         <div class="detail-placeholder">Select a step in the flowchart or press Next to begin.</div>
       </div>
+
     </div>
 
   </main>
@@ -799,7 +825,7 @@ const XLSX = (function () {
 
 </div>
 
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
 /* ═══════════════════════════════════════════════════════
    CONFIG & CONSTANTS  (swim-lane HORIZONTAL layout)
    Lanes = horizontal rows · Flow = left → right
@@ -1114,8 +1140,8 @@ function renderFlowchart(nodes) {
   // Arrowhead markers
   const defs = svgEl('defs');
   [['arrow-normal','#6b7280'],['arrow-no','#e05c2a']].forEach(([id, col]) => {
-    const m = svgEl('marker', { id, markerWidth:'8', markerHeight:'6', refX:'7', refY:'3', orient:'auto' });
-    m.appendChild(svgEl('polygon', { points:'0 0, 8 3, 0 6', fill: col }));
+    const m = svgEl('marker', { id, markerWidth:'6', markerHeight:'6', refX:'3', refY:'3', orient:'auto' });
+    m.appendChild(svgEl('circle', { cx:'3', cy:'3', r:'2.5', fill: col, opacity:'0' }));
     defs.appendChild(m);
   });
   svg.appendChild(defs);
@@ -1414,32 +1440,84 @@ function scrollToNode(node) {
 ═══════════════════════════════════════════════════════ */
 /* Helper: show a single node + its outgoing arrows without affecting revealedCount */
 function drawArrowPath(path, isNo, duration) {
-  // Get real pixel length of this specific path
-  const len = path.getTotalLength();
-  // Start: fully hidden (dasharray = len, offset = len)
+  const svg   = path.ownerSVGElement;
+  const color = path.getAttribute('stroke') || '#6b7280';
+  const len   = path.getTotalLength();
+
+  // ── Draw line via CSS transition ─────────────────────────────────────
   path.style.transition = 'none';
   path.setAttribute('stroke-dasharray', len);
   path.setAttribute('stroke-dashoffset', len);
-  // Force reflow so the browser registers the starting state
   void path.getBoundingClientRect();
-  // Animate to dashoffset=0 (fully drawn)
   path.style.transition = `stroke-dashoffset ${duration}ms cubic-bezier(0.4,0,0.2,1)`;
   path.setAttribute('stroke-dashoffset', 0);
-  // After draw completes, restore dashed style for No arrows
-  if (isNo) {
-    setTimeout(() => {
-      path.style.transition = 'none';
+
+  // Restore dash style after draw
+  setTimeout(() => {
+    path.style.transition = 'none';
+    if (isNo) {
       path.setAttribute('stroke-dasharray', '6 3');
       path.setAttribute('stroke-dashoffset', 0);
-    }, duration + 20);
-  } else {
-    setTimeout(() => {
-      path.style.transition = 'none';
+    } else {
       path.removeAttribute('stroke-dasharray');
       path.removeAttribute('stroke-dashoffset');
-    }, duration + 20);
+    }
+  }, duration + 20);
+
+  // ── Travelling arrowhead — reads actual dashoffset each frame ─────────
+  // This keeps tip perfectly in sync with the CSS transition at all times.
+  const ns   = 'http://www.w3.org/2000/svg';
+  const poly = document.createElementNS(ns, 'polygon');
+  poly.setAttribute('fill', color);
+  svg.appendChild(poly);
+
+  const startTime = performance.now();
+
+  function frame() {
+    // Read the browser's computed dashoffset — exact position CSS transition is at
+    const computed = parseFloat(getComputedStyle(path).strokeDashoffset);
+    const pos = len - computed;   // how much of the line has been drawn so far
+
+    if (pos > 0) {
+      const p1 = path.getPointAtLength(Math.min(pos, len));
+      const p0 = path.getPointAtLength(Math.max(0, pos - 10));
+      const angle = Math.atan2(p1.y - p0.y, p1.x - p0.x);
+
+      const size = 14;
+      const cos  = Math.cos(angle), sin = Math.sin(angle);
+      const tx = p1.x, ty = p1.y;
+      const bx = p1.x - size * cos, by = p1.y - size * sin;
+      const lx = bx + (size * 0.45) * sin,  ly = by - (size * 0.45) * cos;
+      const rx = bx - (size * 0.45) * sin,  ry = by + (size * 0.45) * cos;
+
+      poly.setAttribute('points', `${tx},${ty} ${lx},${ly} ${rx},${ry}`);
+    }
+
+    if (performance.now() - startTime < duration) {
+      requestAnimationFrame(frame);
+    } else {
+      // Animation done — leave arrowhead at final position permanently
+      // (marker-end is transparent so this polygon IS the arrowhead)
+      const p1 = path.getPointAtLength(len);
+      const p0 = path.getPointAtLength(Math.max(0, len - 10));
+      const angle = Math.atan2(p1.y - p0.y, p1.x - p0.x);
+      const size = 14;
+      const cos  = Math.cos(angle), sin = Math.sin(angle);
+      const tx = p1.x, ty = p1.y;
+      const bx = p1.x - size * cos, by = p1.y - size * sin;
+      const lx = bx + (size * 0.45) * sin,  ly = by - (size * 0.45) * cos;
+      const rx = bx - (size * 0.45) * sin,  ry = by + (size * 0.45) * cos;
+      poly.setAttribute('points', `${tx},${ty} ${lx},${ly} ${rx},${ry}`);
+      // Tag so it can be removed on reset
+      poly.classList.add('arrow-tip');
+    }
   }
+  requestAnimationFrame(frame);
 }
+
+
+
+
 
 function showNodeAndArrows(node, animate) {
   const nodeEl = document.getElementById(`node-${node.step_id}`);
@@ -1513,6 +1591,8 @@ function revealPrev() {
 function resetAll() {
   stopPlay();
   revealedCount = 0;
+  // Remove all permanent arrowhead tips
+  document.querySelectorAll('.arrow-tip').forEach(el => el.parentNode && el.parentNode.removeChild(el));
   // Re-render SVG completely so all elements are fresh with opacity:0.
   // Trying to remove/re-add CSS animation classes on SVG <g> elements doesn't
   // reliably restart animations because SVG lacks offsetWidth for forced reflow.
@@ -1589,17 +1669,20 @@ function showDetailPanel(node) {
   }
   const c = NODE_COLORS[node.type] || NODE_COLORS.PROCESS;
   const typeName = c.label;
+  const desc  = (node.desc  && node.desc  !== 'undefined' && node.desc.trim())  ? node.desc  : '';
+  const notes = (node.notes && node.notes !== 'undefined' && node.notes.trim()) ? node.notes : '';
+  const role  = (node.role  && node.role  !== 'undefined' && node.role.trim())  ? node.role  : '';
+  const link  = (node.link  && node.link  !== 'undefined' && node.link.trim())  ? node.link  : '';
   panel.innerHTML = `
     <div class="detail-badge" style="background:${c.fill};">${node.step_id}</div>
     <div class="detail-body">
       <div class="detail-name">${escHtml(node.name)}</div>
-      <div class="detail-desc">${escHtml(node.desc) || '<em style="opacity:0.5">No description provided.</em>'}</div>
+      ${desc ? `<div class="detail-desc">${escHtml(desc)}</div>` : ''}
       <div class="detail-meta">
         <div class="meta-chip">🏷️ ${typeName}</div>
-        ${node.role ? `<div class="meta-chip">👤 ${escHtml(node.role)}</div>` : ''}
-        ${node.notes ? `<div class="meta-chip">📝 ${escHtml(node.notes)}</div>` : ''}
-        ${node.link  ? `<div class="meta-chip" style="cursor:pointer;color:var(--accent)" onclick="openLink('${escHtml(node.link)}')">🔗 Open Document</div>` : ''}
-        ${node.link  ? `<div class="meta-chip" style="cursor:pointer" onclick="openLink(node.link)">🔗 Open Document</div>` : ''}
+        ${role  ? `<div class="meta-chip">👤 ${escHtml(role)}</div>` : ''}
+        ${notes ? `<div class="meta-chip">📝 ${escHtml(notes)}</div>` : ''}
+        ${link  ? `<div class="meta-chip" style="cursor:pointer;color:var(--accent)" onclick="openLink('${escHtml(link)}')">🔗 Open Document</div>` : ''}
       </div>
     </div>`;
 }
@@ -1894,6 +1977,41 @@ function exportPDF() {
 }
 
 /* ═══════════════════════════════════════════════════════
+   DRAG TO SCROLL  — click & drag the flowchart viewport
+═══════════════════════════════════════════════════════ */
+(function () {
+  let isDown = false, startX, startY, scrollLeft, scrollTop;
+
+  const vp = document.getElementById('flowchart-viewport');
+  if (!vp) return;
+
+  vp.addEventListener('mousedown', e => {
+    // Ignore clicks on nodes/buttons
+    if (e.target.closest('.flow-node') || e.target.closest('button')) return;
+    isDown = true;
+    vp.classList.add('dragging');
+    startX    = e.pageX - vp.offsetLeft;
+    startY    = e.pageY - vp.offsetTop;
+    scrollLeft = vp.scrollLeft;
+    scrollTop  = vp.scrollTop;
+    e.preventDefault();
+  });
+
+  document.addEventListener('mouseup', () => {
+    isDown = false;
+    vp.classList.remove('dragging');
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!isDown) return;
+    const x = e.pageX - vp.offsetLeft;
+    const y = e.pageY - vp.offsetTop;
+    vp.scrollLeft = scrollLeft - (x - startX);
+    vp.scrollTop  = scrollTop  - (y - startY);
+  });
+})();
+
+/* ═══════════════════════════════════════════════════════
    BUTTON WIRING
 ═══════════════════════════════════════════════════════ */
 document.getElementById('nextBtn').addEventListener('click', () => { stopPlay(); revealNext(); });
@@ -1991,13 +2109,4 @@ document.addEventListener('keydown', e => {
 document.addEventListener('DOMContentLoaded', function() {
   const btn  = document.getElementById('themeToggle');
   const root = document.documentElement;
-  let saved = 'dark';
-
-  function applyTheme(t) {
-    if (t === 'dark') {
-      root.setAttribute('data-theme', 'dark');
-      btn.classList.add('on');
-
-    } else {
-      root.setAttribute('data-theme', 'light');
-      btn.classList.remove('on');
+  let saved
