@@ -430,7 +430,8 @@ const XLSX = (function () {
   }
   #topic-title {
     font-family: 'Segoe UI', Arial, sans-serif; font-size: 18px; font-weight: 700;
-    color: var(--text-primary); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    flex-shrink: 0; max-width: 280px;
   }
   .controls { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
   .btn {
@@ -740,18 +741,6 @@ const XLSX = (function () {
       <!-- Top bar -->
       <div id="topbar">
         <div id="topic-title">—</div>
-        <div id="legend">
-          <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Start</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#4f6ef7;border-radius:2px"></div> Process</div>
-          <div class="legend-item" style="gap:5px">
-            <svg width="14" height="12" viewBox="0 0 14 12">
-              <path d="M0,0 L14,0 L14,8 Q10.5,12 7,8 Q3.5,4 0,8 Z" fill="#7c5cbf"/>
-            </svg> Document
-          </div>
-          <div class="legend-item" style="gap:4px"><svg width="12" height="12" viewBox="0 0 12 12"><polygon points="6,0 12,6 6,12 0,6" fill="#f59e0b"/></svg> Decision</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div> End</div>
-        </div>
-        <div class="divider"></div>
         <div class="controls">
           <button class="btn btn-ghost" id="resetBtn">↺ Reset</button>
           <button class="btn btn-ghost btn-ghost" id="prevBtn" disabled>← Prev</button>
