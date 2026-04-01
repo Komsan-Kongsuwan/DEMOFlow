@@ -2231,8 +2231,7 @@ function startFlowMode() {
     const ns3   = 'http://www.w3.org/2000/svg';
     const svgEl = document.getElementById('flowchart-svg');
 
-    // ── Measure true perimeter by appending clone to live SVG ──────────
-    // (shape inside a group may give different value than the standalone clone)
+    // Measure perimeter via temp clone at SVG root level
     const tempShape = shape.cloneNode();
     tempShape.setAttribute('visibility', 'hidden');
     svgEl.appendChild(tempShape);
@@ -2240,29 +2239,24 @@ function startFlowMode() {
     svgEl.removeChild(tempShape);
     if (perim < 1) { if (onComplete) onComplete(); return; }
 
-    // ── SVG mask: black bg + white stroke growing reveals dashed border ──
+    // ── SVG mask reveals dashed border ───────────────────────────────────
     const maskId = 'fm-' + Math.random().toString(36).slice(2, 7);
     const maskEl = document.createElementNS(ns3, 'mask');
     maskEl.setAttribute('id', maskId);
     maskEl.setAttribute('maskUnits', 'userSpaceOnUse');
-
     const maskBg = document.createElementNS(ns3, 'rect');
-    maskBg.setAttribute('x', '-9999'); maskBg.setAttribute('y', '-9999');
-    maskBg.setAttribute('width', '99999'); maskBg.setAttribute('height', '99999');
-    maskBg.setAttribute('fill', 'black');
+    maskBg.setAttribute('x','-9999'); maskBg.setAttribute('y','-9999');
+    maskBg.setAttribute('width','99999'); maskBg.setAttribute('height','99999');
+    maskBg.setAttribute('fill','black');
     maskEl.appendChild(maskBg);
-
-    // Clone the shape as mask stroke — natural start position per shape type
     const maskStroke = shape.cloneNode();
     maskStroke.setAttribute('fill',             'none');
     maskStroke.setAttribute('stroke',           'white');
     maskStroke.setAttribute('stroke-width',     '10');
     maskStroke.setAttribute('stroke-linecap',   'round');
-    maskStroke.setAttribute('stroke-dasharray', perim);   // one full dash = single round
-    maskStroke.setAttribute('stroke-dashoffset', perim);  // fully hidden at start
+    maskStroke.setAttribute('stroke-dasharray', perim);
+    maskStroke.setAttribute('stroke-dashoffset', perim);
     maskEl.appendChild(maskStroke);
-
-    // Dashed border overlay, revealed by mask
     const dashedBorder = shape.cloneNode();
     dashedBorder.setAttribute('stroke',           '#ffffff');
     dashedBorder.setAttribute('stroke-width',     '2.5');
@@ -2271,34 +2265,76 @@ function startFlowMode() {
     dashedBorder.setAttribute('stroke-linecap',   'round');
     dashedBorder.setAttribute('fill',             'none');
     dashedBorder.setAttribute('mask',             `url(#${maskId})`);
-
     let defs2 = svgEl.querySelector('defs');
     if (!defs2) { defs2 = document.createElementNS(ns3,'defs'); svgEl.insertBefore(defs2,svgEl.firstChild); }
     defs2.appendChild(maskEl);
     svgEl.appendChild(dashedBorder);
 
-    // dashoffset perim → 0: single round, ease-in-out
-    const drawDur = 2400, holdDur = 300, fadeDur = 400;
+    // ── Collect label text from tspan elements ────────────────────────────
+    // Label text has font-family "Segoe UI" — badge text uses "Courier New"
+    const allTexts = grp.querySelectorAll('text');
+    const labelEl = Array.from(allTexts).find(t =>
+      (t.getAttribute('font-family') || '').includes('Segoe') && t.querySelectorAll('tspan').length > 0
+    );
+    // Get full text and tspan structure for retyping
+    let fullText = '';
+    const tspans = labelEl ? Array.from(labelEl.querySelectorAll('tspan')) : [];
+    const origTexts = tspans.map(t => t.textContent);
+    tspans.forEach(t => { fullText += t.textContent; });
+
+    // ── Animation phases ──────────────────────────────────────────────────
+    const drawDur  = 2400, holdDur = 100, typeDur = 800, fadeDur = 400;
     const t0 = performance.now();
     let completed = false;
 
     function animate(now) {
       if (!flowModeActive) { cleanup(); return; }
       const elapsed = now - t0;
+
       if (elapsed < drawDur) {
+        // Phase 1: dash border travels around node
         const p  = elapsed / drawDur;
         const ep = p < 0.5 ? 2*p*p : -1+(4-2*p)*p;
         maskStroke.setAttribute('stroke-dashoffset', perim * (1 - ep));
         flowDotAnimators.push(requestAnimationFrame(animate));
+
       } else if (elapsed < drawDur + holdDur) {
+        // Phase 2: brief hold — clear text and start typing
         maskStroke.setAttribute('stroke-dashoffset', 0);
-        if (!completed) { completed = true; if (onComplete) onComplete(); }
+        if (labelEl && !animate._textCleared) {
+          animate._textCleared = true;
+          tspans.forEach(t => { t.textContent = ''; });
+        }
         flowDotAnimators.push(requestAnimationFrame(animate));
-      } else {
-        const p = Math.min((elapsed - drawDur - holdDur) / fadeDur, 1);
+
+      } else if (elapsed < drawDur + holdDur + typeDur) {
+        // Phase 3: retype text character by character
+        const tp = (elapsed - drawDur - holdDur) / typeDur;
+        const totalChars = fullText.length;
+        const charsToShow = Math.floor(tp * totalChars);
+        // Distribute chars back across tspans
+        let remaining = charsToShow;
+        tspans.forEach((t, i) => {
+          const orig = origTexts[i];
+          if (remaining <= 0) { t.textContent = ''; }
+          else if (remaining >= orig.length) { t.textContent = orig; remaining -= orig.length; }
+          else { t.textContent = orig.slice(0, remaining); remaining = 0; }
+        });
+        if (!completed && tp >= 1) {
+          completed = true;
+          tspans.forEach((t, i) => { t.textContent = origTexts[i]; }); // restore fully
+          if (onComplete) onComplete();
+        }
+        flowDotAnimators.push(requestAnimationFrame(animate));
+
+      } else if (elapsed < drawDur + holdDur + typeDur + fadeDur) {
+        // Phase 4: fade out dashed border
+        const p = (elapsed - drawDur - holdDur - typeDur) / fadeDur;
         dashedBorder.setAttribute('opacity', 1 - p);
-        if (p >= 1) { cleanup(); return; }
         flowDotAnimators.push(requestAnimationFrame(animate));
+
+      } else {
+        cleanup();
       }
     }
     flowDotAnimators.push(requestAnimationFrame(animate));
@@ -2306,6 +2342,9 @@ function startFlowMode() {
     function cleanup() {
       if (dashedBorder.parentNode) dashedBorder.parentNode.removeChild(dashedBorder);
       if (maskEl.parentNode)       maskEl.parentNode.removeChild(maskEl);
+      // Ensure text is fully restored
+      tspans.forEach((t, i) => { t.textContent = origTexts[i]; });
+      if (!completed) { completed = true; if (onComplete) onComplete(); }
     }
   }
 
