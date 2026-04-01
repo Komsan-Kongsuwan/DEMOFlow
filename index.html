@@ -674,6 +674,9 @@ const XLSX = (function () {
     border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 13px;
   }
 
+  #flowModeBtn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .flow-dot { pointer-events: none; }
+
   .anim-node-in {
     animation: nodeIn 0.45s cubic-bezier(0.34,1.56,0.64,1) forwards;
   }
@@ -770,7 +773,8 @@ const XLSX = (function () {
           <button class="btn btn-ghost" id="resetBtn">↺ Reset</button>
           <button class="btn btn-ghost btn-ghost" id="prevBtn" disabled>← Prev</button>
           <button class="btn btn-ghost" id="nextBtn">Next →</button>
-          <button class="btn btn-primary btn-play" id="playBtn">▶ Auto Play</button>
+          <button class="btn btn-primary btn-play" id="playBtn">▶ Teach Mode</button>
+          <button class="btn btn-ghost" id="flowModeBtn" title="Show all steps at once with travelling dots">⬤ Demo Mode</button>
           <div class="divider"></div>
           <button class="btn btn-ghost" id="exportPdfBtn" title="Export as PDF (A4 Landscape)">⬇ Export PDF</button>
           <div class="divider"></div>
@@ -943,6 +947,7 @@ function renderSidebar() {
 function selectTopic(name) {
   document.querySelectorAll('.topic-item').forEach(el =>
     el.classList.toggle('active', el.dataset.topic === name));
+  stopFlowMode();  // stop Demo Mode before re-rendering
   stopPlay();
   // Use embedded demo steps if available and sheet not in workbook
   const steps = (window._demoSteps && name === window._demoTopic && wb && !wb.Sheets[name])
@@ -959,6 +964,8 @@ function selectTopic(name) {
   document.getElementById('topic-title').textContent = name;
   document.getElementById('welcome-screen').style.display = 'none';
   document.getElementById('flowchart-screen').classList.add('visible');
+  // Auto-start Demo Mode for the new topic
+  setTimeout(() => startFlowMode(), 400);
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1523,7 +1530,8 @@ function showNodeAndArrows(node, animate) {
   const nodeEl = document.getElementById(`node-${node.step_id}`);
   if (nodeEl) {
     nodeEl.style.opacity = '';
-    if (animate) nodeEl.classList.add('anim-node-in');
+    if (animate) { nodeEl.classList.add('anim-node-in'); }
+    else { nodeEl.style.transform = ''; } // reset scale for Demo Mode
   }
   ['yes', 'no'].forEach(t => {
     const arrEl = document.getElementById(`arrow-${node.step_id}-${t}`);
@@ -1533,6 +1541,27 @@ function showNodeAndArrows(node, animate) {
         const path = arrEl.querySelector('path');
         if (path) drawArrowPath(path, t === 'no', 600);
         else arrEl.classList.add('anim-arrow-in');
+      } else {
+        // Static display (Demo Mode) — add permanent arrowhead directly
+        const path = arrEl.querySelector('path');
+        if (path) {
+          const len = path.getTotalLength();
+          if (len > 0) {
+            const p1 = path.getPointAtLength(len);
+            const p0 = path.getPointAtLength(Math.max(0, len - 10));
+            const angle = Math.atan2(p1.y - p0.y, p1.x - p0.x);
+            const size = 14, cos = Math.cos(angle), sin = Math.sin(angle);
+            const bx = p1.x - size*cos, by = p1.y - size*sin;
+            const ns2 = 'http://www.w3.org/2000/svg';
+            const poly = document.createElementNS(ns2, 'polygon');
+            poly.setAttribute('points',
+              `${p1.x},${p1.y} ${bx+(size*0.45)*sin},${by-(size*0.45)*cos} ${bx-(size*0.45)*sin},${by+(size*0.45)*cos}`);
+            poly.setAttribute('fill', t === 'no' ? '#e05c2a' : '#6b7280');
+            poly.classList.add('arrow-tip');
+            const svgEl2 = document.getElementById('flowchart-svg');
+            if (svgEl2) svgEl2.appendChild(poly);
+          }
+        }
       }
     }
   });
@@ -1589,6 +1618,7 @@ function revealPrev() {
 }
 
 function resetAll() {
+  stopFlowMode();
   stopPlay();
   revealedCount = 0;
   // Remove all permanent arrowhead tips
@@ -1638,7 +1668,7 @@ function tick() {
 function stopPlay() {
   isPlaying = false;
   clearTimeout(playTimer);
-  document.getElementById('playBtn').textContent = '▶ Auto Play';
+  document.getElementById('playBtn').textContent = '▶ Teach Mode';
   document.getElementById('playBtn').classList.replace('btn-ghost', 'btn-primary');
   sidebarShow();
 }
@@ -1725,8 +1755,8 @@ function loadDemoJSON(data) {
   document.getElementById('welcome-screen').style.display = 'none';
   document.getElementById('flowchart-screen').classList.add('visible');
 
-  // Auto-play after short delay
-  setTimeout(() => startPlay(), 800);
+  // Auto-start Demo Mode after short delay
+  setTimeout(() => startFlowMode(), 800);
 }
 
 
@@ -2012,6 +2042,296 @@ function exportPDF() {
 })();
 
 /* ═══════════════════════════════════════════════════════
+   FLOW MODE  — show all steps at once, animate dots along routes
+   Like ByteByteGo style: circles travel continuously along arrows.
+   Runs independently of the step-by-step Auto Play mode.
+═══════════════════════════════════════════════════════ */
+let flowModeActive   = false;
+let flowDotAnimators = []; // holds cancelAnimationFrame handles
+
+function startFlowMode() {
+  if (flowModeActive) { stopFlowMode(); return; }
+
+  stopPlay();
+  revealedCount = revealOrder.length;
+  revealOrder.forEach(node => showNodeAndArrows(node, false));
+  updateProgress(); updateControls();
+
+  flowModeActive = true;
+  document.getElementById('flowModeBtn').classList.add('active');
+  document.getElementById('flowModeBtn').textContent = '◼ Stop Demo';
+
+  const svg = document.getElementById('flowchart-svg');
+  const nodeMap = {};
+  currentNodes.forEach(n => nodeMap[n.step_id] = n);
+
+  const DOT_SPEED  = 180;
+  const NODE_PAUSE = 180;
+  let   activeDots = new Set();
+  // Map<convergenceNodeId, { dot, onMerge }> — holds the dot waiting at convergence
+  let   waiters    = new Map();
+
+  function makeDot(isNo) {
+    const d = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    d.setAttribute('r', '6');
+    d.setAttribute('fill', isNo ? '#e05c2a' : '#4f6ef7');
+    d.setAttribute('stroke', '#fff');
+    d.setAttribute('stroke-width', '2');
+    d.classList.add('flow-dot');
+    svg.appendChild(d);
+    activeDots.add(d);
+    return d;
+  }
+
+  function removeDot(dot) {
+    if (dot.parentNode) dot.parentNode.removeChild(dot);
+    activeDots.delete(dot);
+    if (activeDots.size === 0 && flowModeActive) {
+      waiters.clear();
+      setTimeout(() => { if (flowModeActive) kickoff(); }, 600);
+    }
+  }
+
+  function travel(dot, path, isNo, onArrive) {
+    const len = path.getTotalLength();
+    const dur = (len / DOT_SPEED) * 1000;
+    const t0  = performance.now();
+    dot.setAttribute('fill', isNo ? '#e05c2a' : '#4f6ef7');
+
+    function frame(now) {
+      if (!flowModeActive) { removeDot(dot); return; }
+      const t  = Math.min((now - t0) / dur, 1);
+      const pt = path.getPointAtLength(t * len);
+      dot.setAttribute('cx', pt.x);
+      dot.setAttribute('cy', pt.y);
+      dot.setAttribute('r', 5.5 + Math.sin(t * Math.PI) * 2);
+      // Scroll viewport to keep dot centred — only for the primary (blue) dot
+      if (!isNo) {
+        const vp = document.getElementById('flowchart-viewport');
+        if (vp) {
+          const svgEl = document.getElementById('flowchart-svg');
+          const scaleX = svgEl ? vp.scrollWidth / parseFloat(svgEl.getAttribute('width') || vp.scrollWidth) : 1;
+          const scaleY = svgEl ? vp.scrollHeight / parseFloat(svgEl.getAttribute('height') || vp.scrollHeight) : 1;
+          const cx = pt.x * scaleX;
+          const cy = pt.y * scaleY;
+          const targetLeft = cx - vp.clientWidth  / 2;
+          const targetTop  = cy - vp.clientHeight / 2;
+          vp.scrollLeft += (targetLeft - vp.scrollLeft) * 0.05;
+          vp.scrollTop  += (targetTop  - vp.scrollTop)  * 0.05;
+        }
+      }
+      if (t < 1) { flowDotAnimators.push(requestAnimationFrame(frame)); return; }
+      setTimeout(() => { if (flowModeActive) onArrive(dot); }, NODE_PAUSE);
+    }
+    flowDotAnimators.push(requestAnimationFrame(frame));
+  }
+
+  // Find first node reachable from BOTH yes and no branches (convergence point)
+  function findConvergence(node) {
+    if (!node.next_yes || !node.next_no) return null;
+    const yesSet = new Set();
+    const q = [node.next_yes];
+    while (q.length) {
+      const id = q.shift();
+      if (yesSet.has(id)) continue;
+      yesSet.add(id);
+      const n = nodeMap[id];
+      if (n) { if (n.next_yes) q.push(n.next_yes); if (n.next_no) q.push(n.next_no); }
+    }
+    const noQ = [node.next_no];
+    const seen = new Set();
+    while (noQ.length) {
+      const id = noQ.shift();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (yesSet.has(id)) return id;
+      const n = nodeMap[id];
+      if (n) { if (n.next_yes) noQ.push(n.next_yes); if (n.next_no) noQ.push(n.next_no); }
+    }
+    return null;
+  }
+
+  // Dispatch a dot forward from a node
+  function dispatch(node, dot, convergenceId) {
+    if (!node || !flowModeActive) { removeDot(dot); return; }
+
+    // If this node is the convergence point for a split — synchronise
+    if (convergenceId && node.step_id === convergenceId) {
+      if (waiters.has(convergenceId)) {
+        // Other dot already waiting — remove waiting dot, continue with this one
+        const { waitingDot } = waiters.get(convergenceId);
+        waiters.delete(convergenceId);
+        removeDot(waitingDot);
+        dot.setAttribute('fill', '#4f6ef7'); // back to blue
+        flashNode(node, () => dispatchForward(node, dot, null)); // flash on merge
+      } else {
+        // First to arrive — park and wait
+        waiters.set(convergenceId, { waitingDot: dot });
+        // Pulse in place while waiting
+        pulseWait(dot);
+      }
+      return;
+    }
+    dispatchForward(node, dot, convergenceId);
+  }
+
+  function dispatchForward(node, dot, convergenceId) {
+    const isBlue = !dot.getAttribute('fill').includes('e05c2a');
+
+    const proceed = () => {
+      if (!flowModeActive) return;
+      const yesEl = document.getElementById(`arrow-${node.step_id}-yes`);
+      const noEl  = document.getElementById(`arrow-${node.step_id}-no`);
+      const yesPath = yesEl && yesEl.querySelector('path');
+      const noPath  = noEl  && noEl.querySelector('path');
+
+      if (!yesPath && !noPath) { removeDot(dot); return; }
+
+      if (yesPath && noPath) {
+        const convId = findConvergence(node);
+        travel(dot, yesPath, false, d => dispatch(nodeMap[node.next_yes], d, convId));
+        const noDot = makeDot(true);
+        const startPt = noPath.getPointAtLength(0);
+        noDot.setAttribute('cx', startPt.x);
+        noDot.setAttribute('cy', startPt.y);
+        travel(noDot, noPath, true, d => dispatch(nodeMap[node.next_no], d, convId));
+      } else if (yesPath) {
+        travel(dot, yesPath, false, d => dispatch(nodeMap[node.next_yes], d, convergenceId));
+      } else {
+        travel(dot, noPath, true, d => dispatch(nodeMap[node.next_no], d, convergenceId));
+      }
+    };
+
+    // All dots wait for border draw — both YES and NO branches get the effect
+    flashNode(node, proceed);
+  }
+
+  // Gentle pulsing in place while waiting at convergence
+  function pulseWait(dot) {
+    let t = 0;
+    function pulse() {
+      if (!flowModeActive || !dot.parentNode) return;
+      if (!waiters.has(dot.getAttribute('_wkey')) && [...waiters.values()].every(w => w.waitingDot !== dot)) return;
+      t += 0.08;
+      dot.setAttribute('r', 5 + Math.sin(t) * 1.5);
+      dot.setAttribute('opacity', 0.7 + Math.sin(t) * 0.3);
+      flowDotAnimators.push(requestAnimationFrame(pulse));
+    }
+    flowDotAnimators.push(requestAnimationFrame(pulse));
+  }
+
+  // Re-draw the node's own border using stroke-dashoffset animation
+  function flashNode(node, onComplete) {
+    if (!node || !flowModeActive) { if (onComplete) onComplete(); return; }
+    const grp = document.getElementById(`node-${node.step_id}`);
+    if (!grp) { if (onComplete) onComplete(); return; }
+    const shape = grp.querySelector('polygon[stroke], rect[stroke], path[stroke]');
+    if (!shape) { if (onComplete) onComplete(); return; }
+
+    const ns3   = 'http://www.w3.org/2000/svg';
+    const svgEl = document.getElementById('flowchart-svg');
+
+    // ── Measure true perimeter by appending clone to live SVG ──────────
+    // (shape inside a group may give different value than the standalone clone)
+    const tempShape = shape.cloneNode();
+    tempShape.setAttribute('visibility', 'hidden');
+    svgEl.appendChild(tempShape);
+    const perim = tempShape.getTotalLength ? tempShape.getTotalLength() : 400;
+    svgEl.removeChild(tempShape);
+    if (perim < 1) { if (onComplete) onComplete(); return; }
+
+    // ── SVG mask: black bg + white stroke growing reveals dashed border ──
+    const maskId = 'fm-' + Math.random().toString(36).slice(2, 7);
+    const maskEl = document.createElementNS(ns3, 'mask');
+    maskEl.setAttribute('id', maskId);
+    maskEl.setAttribute('maskUnits', 'userSpaceOnUse');
+
+    const maskBg = document.createElementNS(ns3, 'rect');
+    maskBg.setAttribute('x', '-9999'); maskBg.setAttribute('y', '-9999');
+    maskBg.setAttribute('width', '99999'); maskBg.setAttribute('height', '99999');
+    maskBg.setAttribute('fill', 'black');
+    maskEl.appendChild(maskBg);
+
+    // Clone the shape as mask stroke — natural start position per shape type
+    const maskStroke = shape.cloneNode();
+    maskStroke.setAttribute('fill',             'none');
+    maskStroke.setAttribute('stroke',           'white');
+    maskStroke.setAttribute('stroke-width',     '10');
+    maskStroke.setAttribute('stroke-linecap',   'round');
+    maskStroke.setAttribute('stroke-dasharray', perim);   // one full dash = single round
+    maskStroke.setAttribute('stroke-dashoffset', perim);  // fully hidden at start
+    maskEl.appendChild(maskStroke);
+
+    // Dashed border overlay, revealed by mask
+    const dashedBorder = shape.cloneNode();
+    dashedBorder.setAttribute('stroke',           '#ffffff');
+    dashedBorder.setAttribute('stroke-width',     '2.5');
+    dashedBorder.setAttribute('stroke-dasharray', '4 3');
+    dashedBorder.setAttribute('stroke-dashoffset','0');
+    dashedBorder.setAttribute('stroke-linecap',   'round');
+    dashedBorder.setAttribute('fill',             'none');
+    dashedBorder.setAttribute('mask',             `url(#${maskId})`);
+
+    let defs2 = svgEl.querySelector('defs');
+    if (!defs2) { defs2 = document.createElementNS(ns3,'defs'); svgEl.insertBefore(defs2,svgEl.firstChild); }
+    defs2.appendChild(maskEl);
+    svgEl.appendChild(dashedBorder);
+
+    // dashoffset perim → 0: single round, ease-in-out
+    const drawDur = 2400, holdDur = 300, fadeDur = 400;
+    const t0 = performance.now();
+    let completed = false;
+
+    function animate(now) {
+      if (!flowModeActive) { cleanup(); return; }
+      const elapsed = now - t0;
+      if (elapsed < drawDur) {
+        const p  = elapsed / drawDur;
+        const ep = p < 0.5 ? 2*p*p : -1+(4-2*p)*p;
+        maskStroke.setAttribute('stroke-dashoffset', perim * (1 - ep));
+        flowDotAnimators.push(requestAnimationFrame(animate));
+      } else if (elapsed < drawDur + holdDur) {
+        maskStroke.setAttribute('stroke-dashoffset', 0);
+        if (!completed) { completed = true; if (onComplete) onComplete(); }
+        flowDotAnimators.push(requestAnimationFrame(animate));
+      } else {
+        const p = Math.min((elapsed - drawDur - holdDur) / fadeDur, 1);
+        dashedBorder.setAttribute('opacity', 1 - p);
+        if (p >= 1) { cleanup(); return; }
+        flowDotAnimators.push(requestAnimationFrame(animate));
+      }
+    }
+    flowDotAnimators.push(requestAnimationFrame(animate));
+
+    function cleanup() {
+      if (dashedBorder.parentNode) dashedBorder.parentNode.removeChild(dashedBorder);
+      if (maskEl.parentNode)       maskEl.parentNode.removeChild(maskEl);
+    }
+  }
+
+
+  function kickoff() {
+    if (!revealOrder.length) return;
+    waiters.clear();
+    const dot = makeDot(false);
+    dispatch(revealOrder[0], dot, null);
+  }
+
+  kickoff();
+}
+
+
+function stopFlowMode() {
+  flowModeActive = false;
+  flowDotAnimators.forEach(id => cancelAnimationFrame(id));
+  flowDotAnimators = [];
+  // Remove all dot elements
+  document.querySelectorAll('.flow-dot').forEach(d => d.parentNode && d.parentNode.removeChild(d));
+  document.getElementById('flowModeBtn').classList.remove('active');
+  document.getElementById('flowModeBtn').textContent = '⬤ Demo Mode';
+}
+
+/* ═══════════════════════════════════════════════════════
    BUTTON WIRING
 ═══════════════════════════════════════════════════════ */
 document.getElementById('nextBtn').addEventListener('click', () => { stopPlay(); revealNext(); });
@@ -2019,6 +2339,7 @@ document.getElementById('prevBtn').addEventListener('click', () => { stopPlay();
 document.getElementById('resetBtn').addEventListener('click', resetAll);
 document.getElementById('pdf-modal-close').addEventListener('click', closePdfModal);
 document.getElementById('exportPdfBtn').addEventListener('click', exportPDF);
+document.getElementById('flowModeBtn').addEventListener('click', startFlowMode);
 document.getElementById('playBtn').addEventListener('click', () => {
   if (isPlaying) stopPlay(); else startPlay();
 });
