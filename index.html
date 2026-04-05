@@ -444,6 +444,11 @@ const XLSX = (function () {
   .btn-ghost:disabled { opacity: 0.35; cursor: default; }
   .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn-primary:hover { background: var(--accent-hover); }
+  .btn-control { background: #0e7490; color: #fff; border-color: #0c6278; }
+  .btn-control:hover { background: #0c6278; }
+  .btn-nav { background: #475569; color: #f1f5f9; border-color: #64748b; }
+  .btn-nav:hover { background: #64748b; }
+  .btn-nav:disabled { background: #334155; color: #64748b; border-color: #475569; cursor: not-allowed; }
   .btn-play { min-width: 110px; justify-content: center; }
   .speed-wrap {
     display: flex; align-items: center; gap: 8px;
@@ -486,8 +491,8 @@ const XLSX = (function () {
     display: flex;
     flex-direction: column;
     z-index: 10;
-    overflow: hidden;  /* clip to visible area; scrollTop moved by JS */
-    align-self: stretch; /* fill full height of wrap */
+    overflow: hidden;
+    align-self: stretch;
   }
   .lane-header-cell {
     display: flex; align-items: center; justify-content: center;
@@ -511,6 +516,7 @@ const XLSX = (function () {
     user-select: none;
   }
   #flowchart-viewport.dragging { cursor: grabbing; }
+  #zoom-container { transition: transform 0.15s ease; display: inline-flex; vertical-align: top; }
   #flowchart-viewport::-webkit-scrollbar { height: 6px; width: 6px; }
   #flowchart-viewport::-webkit-scrollbar-track { background: transparent; }
   #flowchart-viewport::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 6px; }
@@ -598,8 +604,8 @@ const XLSX = (function () {
 
   /* Animations */
   @keyframes nodeIn {
-    from { opacity: 0; transform: scale(0.6); }
-    to   { opacity: 1; transform: scale(1); }
+    from { opacity: 0; }
+    to   { opacity: 1; }
   }
   /* arrowIn is handled by JS using getTotalLength() */
   .anim-arrow-in { /* marker class only — animation done in JS */ }
@@ -678,7 +684,7 @@ const XLSX = (function () {
   .flow-dot { pointer-events: none; }
 
   .anim-node-in {
-    animation: nodeIn 0.45s cubic-bezier(0.34,1.56,0.64,1) forwards;
+    animation: nodeIn 0.4s ease-out forwards;
   }
 </style>
 </head>
@@ -720,12 +726,12 @@ const XLSX = (function () {
       </label>
       <label class="upload-btn" id="pdfUploadLabel" style="margin-top:8px;" title="Upload PDF, JPG, PNG or other reference documents">
         <input type="file" id="pdfInput" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.bmp,.svg" multiple>
-        📄 Upload Reference Docs
+        📄 Load Reference Docs
       </label>
       <div id="pdf-list"></div>
       <div id="pdf-upload-msg" style="display:none;font-size:11px;color:#f59e0b;padding:4px 2px;line-height:1.4;"></div>
     </div>
-    <div class="sidebar-section-label">Work Topics</div>
+    <div class="sidebar-section-label">Topic Flowchart</div>
     <nav id="topicList">
       <div class="no-topics">Load an Excel file to see work topics here.</div>
     </nav>
@@ -770,17 +776,29 @@ const XLSX = (function () {
       <div id="topbar">
         <div id="topic-title">—</div>
         <div class="controls">
-          <button class="btn btn-ghost" id="resetBtn">↺ Reset</button>
-          <button class="btn btn-ghost btn-ghost" id="prevBtn" disabled>← Prev</button>
-          <button class="btn btn-ghost" id="nextBtn">Next →</button>
+          <span id="teach-controls" style="display:none;gap:6px;">
+          <button class="btn btn-nav" id="resetBtn">↺ Reset</button>
+          <button class="btn btn-nav" id="prevBtn" disabled>← Prev</button>
+          <button class="btn btn-nav" id="nextBtn">Next →</button>
+          </span>
           <button class="btn btn-primary btn-play" id="playBtn">▶ Teach Mode</button>
-          <button class="btn btn-ghost" id="flowModeBtn" title="Show all steps at once with travelling dots">⬤ Demo Mode</button>
+          <button class="btn btn-primary" id="exitTeachBtn" style="display:none;">◼ Exit Teach</button>
+          <button class="btn btn-primary" id="flowModeBtn" title="Show all steps at once with travelling dots">⬤ Demo Mode</button>
           <div class="divider"></div>
-          <button class="btn btn-ghost" id="exportPdfBtn" title="Export as PDF (A4 Landscape)">⬇ Export PDF</button>
+          <button class="btn btn-primary" id="exportPdfBtn" title="Export as PDF (A4 Landscape)">⬇ Export PDF</button>
+          <button class="btn btn-primary" id="exportPptxBtn" title="Export as editable PowerPoint shapes">⬇ Export PPTX</button>
+          <div class="divider"></div>
+          <button class="btn btn-nav" id="flowDirBtn" title="Toggle flow direction">⇄ Horizontal</button>
           <div class="divider"></div>
           <div class="speed-wrap">
             Speed
             <input type="range" id="speedSlider" min="1" max="5" value="3">
+          </div>
+          <div class="divider"></div>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <button class="btn btn-nav" id="zoomOutBtn" title="Zoom out" style="padding:4px 10px;font-size:16px;">−</button>
+            <span id="zoomLabel" style="font-size:12px;min-width:36px;text-align:center;color:var(--text-muted);cursor:pointer;" title="Reset zoom">100%</span>
+            <button class="btn btn-nav" id="zoomInBtn"  title="Zoom in"  style="padding:4px 10px;font-size:16px;">+</button>
           </div>
         </div>
       </div>
@@ -793,11 +811,15 @@ const XLSX = (function () {
 
       <!-- SVG viewport -->
       <div id="flowchart-wrap">
-        <!-- Sticky lane-label column — fixed on left, doesn't scroll -->
+        <!-- Lane headers: left strip (horizontal) or top strip (vertical) -->
         <div id="lane-headers"></div>
-        <!-- Scrollable SVG area -->
+        <!-- Scrollable viewport -->
         <div id="flowchart-viewport">
-          <svg id="flowchart-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+          <!-- Sticky header for vertical mode — inside viewport so it scrolls horizontally -->
+          <div id="lane-headers-v" style="display:none;position:sticky;top:0;z-index:20;flex-direction:row;"></div>
+          <div id="zoom-container" style="display:flex;transform-origin:top left;">
+            <svg id="flowchart-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+          </div>
         </div>
       </div>
 
@@ -834,13 +856,16 @@ const XLSX = (function () {
    CONFIG & CONSTANTS  (swim-lane HORIZONTAL layout)
    Lanes = horizontal rows · Flow = left → right
 ═══════════════════════════════════════════════════════ */
-const LANE_H    = 160;   // height of each swimlane row
+const LANE_H    = 200;   // height of each swimlane row
 const HEADER_W  = 40;    // left lane-label strip width — narrow for vertical text
 const COL_W     = 210;   // horizontal distance between node centres
 const NW = 155, NH = 58; // node width / height
 const PAD_L     = 82;    // gap between lane header and first node
 const PAD_R     = 50;    // padding after last column
 const MARGIN    = 22;    // clearance outside lanes for No routing
+const ROW_W     = 240;   // vertical mode: width of each swimlane column
+const ROW_H     = 110;   // vertical mode: vertical distance between node centres
+const HEADER_H  = 40;    // vertical mode: top lane-label strip height
 const DIAMOND_HW = NW / 2 + 10;
 const DIAMOND_HH = NH / 2 + 8;
 
@@ -881,7 +906,9 @@ const NODE_COLORS = {
   END:      { fill: '#ef4444', stroke: '#dc2626', text: '#fff',    label: 'END' },
   PROCESS:  { fill: '#4f6ef7', stroke: '#3d5be4', text: '#fff',    label: 'PROCESS' },
   DOCUMENT: { fill: '#7c5cbf', stroke: '#6344a8', text: '#fff',    label: 'DOCUMENT' },
-  DECISION: { fill: '#f59e0b', stroke: '#d97706', text: '#1a1a1a', label: 'DECISION' },
+  DECISION:    { fill: '#f59e0b', stroke: '#d97706', text: '#1a1a1a', label: 'DECISION' },
+  PREPARATION: { fill: '#0ea5e9', stroke: '#0284c7', text: '#fff',    label: 'PREPARATION' },
+  DATAINPUT:   { fill: '#14b8a6', stroke: '#0d9488', text: '#fff',    label: 'DATA INPUT' },
 };
 
 const SPEED_MAP = { 1: 2200, 2: 1600, 3: 1100, 4: 700, 5: 350 };
@@ -891,11 +918,21 @@ const SPEED_MAP = { 1: 2200, 2: 1600, 3: 1100, 4: 700, 5: 350 };
 /* ─── Coordinate helpers (HORIZONTAL) ───────────────
    lane  = swimlane row (0 = top, 1 = middle, 2 = bottom)
    svgCol = step column left→right (0, 1, 2 …)          */
+// Horizontal mode helpers
 function laneTop(l)   { return l * LANE_H; }
 function laneCY(l)    { return l * LANE_H + LANE_H / 2; }
-function nodeX(col)   { return HEADER_W + PAD_L + col * COL_W - NW / 2; }
-function nodeY(lane)  { return laneCY(lane) - NH / 2; }
-function nodeCX(col)  { return HEADER_W + PAD_L + col * COL_W; }
+function nodeX(col)   { return flowDir==='vertical' ? laneCY(0) : HEADER_W + PAD_L + col * COL_W - NW / 2; }
+function nodeY(lane)  { return flowDir==='vertical' ? HEADER_H + PAD_L + lane===0 ? 0 : 0 : laneCY(lane) - NH / 2; }
+function nodeCX(col)  { return flowDir==='vertical' ? laneCY_V(col) : HEADER_W + PAD_L + col * COL_W; }
+
+// Vertical mode helpers (lanes = columns, flow = top→bottom)
+function laneLeft(l)  { return l * ROW_W; }           // left edge of lane column
+function laneCX_V(l)  { return l * ROW_W + ROW_W / 2; } // center X of lane column
+function laneCY_V(col){ return laneCX_V(col); }
+function nodeX_V(lane){ return laneLeft(lane) + (ROW_W - NW) / 2; }
+function nodeY_V(col) { return HEADER_H + PAD_L + col * ROW_H - NH / 2; }
+function nodeCX_V(lane){ return laneCX_V(lane); }
+function nodeCY_V(col){ return HEADER_H + PAD_L + col * ROW_H; }
 function nodeCY(lane) { return laneCY(lane); }
 
 /* ═══════════════════════════════════════════════════════
@@ -948,7 +985,17 @@ function selectTopic(name) {
   document.querySelectorAll('.topic-item').forEach(el =>
     el.classList.toggle('active', el.dataset.topic === name));
   stopFlowMode();  // stop Demo Mode before re-rendering
+  zoomLevel = 1.0; applyZoom();
   stopPlay();
+  // Reset all buttons to idle state
+  document.getElementById('teach-controls').style.display = 'none';
+  document.getElementById('exitTeachBtn').style.display   = 'none';
+  document.getElementById('exportPdfBtn').style.display   = '';
+  document.getElementById('flowModeBtn').style.display    = '';
+  document.getElementById('playBtn').style.display        = '';
+  document.getElementById('playBtn').textContent          = '▶ Teach Mode';
+  document.getElementById('playBtn').classList.remove('btn-ghost', 'btn-control');
+  document.getElementById('playBtn').classList.add('btn-primary');
   // Use embedded demo steps if available and sheet not in workbook
   const steps = (window._demoSteps && name === window._demoTopic && wb && !wb.Sheets[name])
     ? window._demoSteps
@@ -961,11 +1008,10 @@ function selectTopic(name) {
   updateProgress();
   updateControls();
   showDetailPanel(null);
-  document.getElementById('topic-title').textContent = name;
+  document.getElementById('topic-title').textContent = name + ' Flowchart';
   document.getElementById('welcome-screen').style.display = 'none';
   document.getElementById('flowchart-screen').classList.add('visible');
-  // Auto-start Demo Mode for the new topic
-  setTimeout(() => startFlowMode(), 400);
+
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1089,8 +1135,12 @@ function renderFlowchart(nodes) {
 
   const numLanes = LANE_DEFS.length;
   const maxCol   = Math.max(...nodes.map(n => n.svgCol));
-  const svgW = HEADER_W + PAD_L + maxCol * COL_W + NW / 2 + PAD_R;
-  const svgH = numLanes * LANE_H;
+  const svgW = flowDir === 'vertical'
+    ? numLanes * ROW_W
+    : HEADER_W + PAD_L + maxCol * COL_W + NW / 2 + PAD_R;
+  const svgH = flowDir === 'vertical'
+    ? HEADER_H + PAD_L + maxCol * ROW_H + NH / 2 + PAD_R
+    : numLanes * LANE_H;
 
   svg.setAttribute('viewBox', `0 0 ${svgW} ${svgH}`);
   svg.setAttribute('width',   svgW);
@@ -1111,24 +1161,68 @@ function renderFlowchart(nodes) {
   // make it sticky via JS on scroll.
   // ── HTML sticky lane headers (left of viewport, don't scroll) ──────────
   const hdrDiv = document.getElementById('lane-headers');
-  hdrDiv.style.display     = 'flex';
-  hdrDiv.style.flexDirection = 'column';
-  hdrDiv.style.width         = HEADER_W + 'px';
-  hdrDiv.style.minWidth      = HEADER_W + 'px';
-  // height is controlled by CSS (align-self:stretch) — don't override it
-  hdrDiv.innerHTML = '';
+  if (hdrDiv) hdrDiv.innerHTML = '';
+  const wrapEl = document.getElementById('flowchart-wrap');
+  const hdrDivV2 = document.getElementById('lane-headers-v');
+  if (hdrDivV2) hdrDivV2.innerHTML = '';
+
+  if (flowDir === 'vertical') {
+    // Vertical: sticky header strip inside viewport — no DOM hdrDiv needed
+    if (wrapEl) wrapEl.style.flexDirection = 'row';
+    if (hdrDiv) hdrDiv.style.display = 'none';
+    if (hdrDivV2) {
+      hdrDivV2.style.display       = 'flex';
+      hdrDivV2.style.flexDirection = 'row';
+      hdrDivV2.style.height        = HEADER_H + 'px';
+      hdrDivV2.style.minHeight     = HEADER_H + 'px';
+      hdrDivV2.style.width         = 'max-content';
+      hdrDivV2.style.flexShrink    = '0';
+    }
+  } else {
+    // Horizontal: left vertical strip
+    if (wrapEl) wrapEl.style.flexDirection = 'row';
+    if (hdrDivV2) hdrDivV2.style.display = 'none';
+    if (hdrDiv) {
+      hdrDiv.style.display       = 'flex';
+      hdrDiv.style.flexDirection = 'column';
+      hdrDiv.style.flexShrink    = '0';
+      hdrDiv.style.width         = HEADER_W + 'px';
+      hdrDiv.style.minWidth      = HEADER_W + 'px';
+      hdrDiv.style.height        = 'auto';
+      hdrDiv.style.overflowX     = 'visible';
+      hdrDiv.style.overflowY     = 'hidden';
+    }
+  }
+  const targetHdr = (flowDir === 'vertical' ? hdrDivV2 : hdrDiv) || document.createElement('div');
   for (let l = 0; l < numLanes; l++) {
     const cell = document.createElement('div');
     cell.className        = 'lane-header-cell';
-    cell.style.height     = LANE_H + 'px';
-    cell.style.minHeight  = LANE_H + 'px';
+    if (flowDir === 'vertical') {
+      cell.style.width        = ROW_W + 'px';
+      cell.style.minWidth     = ROW_W + 'px';
+      cell.style.height       = HEADER_H + 'px';
+      cell.style.minHeight    = HEADER_H + 'px';
+      cell.style.writingMode  = 'horizontal-tb';
+      cell.style.textOrientation = 'mixed';
+      cell.style.transform    = 'none';
+      cell.style.letterSpacing = '1px';
+    } else {
+      cell.style.width        = '';
+      cell.style.minWidth     = '';
+      cell.style.height       = LANE_H + 'px';
+      cell.style.minHeight    = LANE_H + 'px';
+      cell.style.writingMode  = 'vertical-rl';
+      cell.style.textOrientation = 'mixed';
+      cell.style.transform    = 'rotate(180deg)';
+      cell.style.letterSpacing = '1.5px';
+    }
     // Convert hex to rgba with reduced opacity for softer look
     const hx = laneHdrColors[l];
     const hr = parseInt(hx.slice(1,3),16), hg = parseInt(hx.slice(3,5),16), hb = parseInt(hx.slice(5,7),16);
-    cell.style.background = `rgba(${hr},${hg},${hb},0.72)`;
+    cell.style.background = flowDir === 'vertical' ? `rgb(${hr},${hg},${hb})` : `rgba(${hr},${hg},${hb},0.72)`;
     cell.style.borderBottom = l < numLanes-1 ? '1px solid rgba(255,255,255,0.25)' : 'none';
     cell.textContent = LANE_DEFS[l].label;
-    hdrDiv.appendChild(cell);
+    targetHdr.appendChild(cell);
   }
 
 
@@ -1136,12 +1230,26 @@ function renderFlowchart(nodes) {
   // ── SVG lane backgrounds ───────────────────────────────────────────────
   for (let l = 0; l < numLanes; l++) {
     svg.appendChild(svgEl('rect', {
-      x: 0, y: laneTop(l), width: svgW, height: LANE_H, fill: laneColors[l]
+      x: flowDir==='vertical' ? laneLeft(l) : 0,
+      y: flowDir==='vertical' ? 0 : laneTop(l),
+      width:  flowDir==='vertical' ? ROW_W  : svgW,
+      height: flowDir==='vertical' ? svgH   : LANE_H,
+      fill: laneColors[l]
     }));
-    if (l > 0) svg.appendChild(svgEl('line', {
-      x1: 0, y1: laneTop(l), x2: svgW, y2: laneTop(l),
-      stroke: '#d1d5db', 'stroke-width': '1', 'stroke-dasharray': '4 3'
-    }));
+    if (l > 0) {
+      if (flowDir === 'vertical') {
+        svg.appendChild(svgEl('line', {
+          x1: laneLeft(l), y1: 0, x2: laneLeft(l), y2: svgH,
+          stroke: '#d1d5db', 'stroke-width': '1', 'stroke-dasharray': '4 3'
+        }));
+      } else {
+        svg.appendChild(svgEl('line', {
+          x1: 0, y1: laneTop(l), x2: svgW, y2: laneTop(l),
+          stroke: '#d1d5db', 'stroke-width': '1', 'stroke-dasharray': '4 3'
+        }));
+      }
+    }
+
   }
 
   // Arrowhead markers
@@ -1187,6 +1295,8 @@ function renderFlowchart(nodes) {
     nodeLayer.appendChild(g);
   });
   svg.appendChild(nodeLayer);
+  // Ensure zoom-container size is correct for scroll
+  setTimeout(applyZoom, 0);
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1195,10 +1305,10 @@ function renderFlowchart(nodes) {
 function buildNode(node) {
   const g  = svgEl('g');
   const c  = NODE_COLORS[node.type] || NODE_COLORS.PROCESS;
-  const x  = nodeX(node.svgCol);
-  const y  = nodeY(node.lane);
-  const cx = nodeCX(node.svgCol);
-  const cy = nodeCY(node.lane);
+  const x  = flowDir === 'vertical' ? nodeX_V(node.lane)    : nodeX(node.svgCol);
+  const y  = flowDir === 'vertical' ? nodeY_V(node.svgCol)   : nodeY(node.lane);
+  const cx = flowDir === 'vertical' ? nodeCX_V(node.lane)    : nodeCX(node.svgCol);
+  const cy = flowDir === 'vertical' ? nodeCY_V(node.svgCol)  : nodeCY(node.lane);
 
   // Shadow
   if (node.type !== 'DECISION') {
@@ -1222,6 +1332,23 @@ function buildNode(node) {
     const d = `M${x},${y} L${x+NW},${y} L${x+NW},${y+NH-wv} Q${x+NW*0.75},${y+NH+wv} ${x+NW*0.5},${y+NH-wv} Q${x+NW*0.25},${y+NH-wv*3} ${x},${y+NH-wv} Z`;
     shape = svgEl('path', { d, fill: c.fill, stroke: c.stroke, 'stroke-width': '2',
       filter: 'drop-shadow(2px 3px 5px rgba(0,0,0,0.25))' });
+
+  } else if (node.type === 'PREPARATION') {
+    const hp = 18;
+    shape = svgEl('polygon', {
+      points: `${x+hp},${y} ${x+NW-hp},${y} ${x+NW},${y+NH/2} ${x+NW-hp},${y+NH} ${x+hp},${y+NH} ${x},${y+NH/2}`,
+      fill: c.fill, stroke: c.stroke, 'stroke-width': '2',
+      filter: 'drop-shadow(2px 3px 5px rgba(0,0,0,0.25))'
+    });
+
+  } else if (node.type === 'DATAINPUT') {
+    const sk = 14;
+    shape = svgEl('polygon', {
+      points: `${x+sk},${y} ${x+NW},${y} ${x+NW-sk},${y+NH} ${x},${y+NH}`,
+      fill: c.fill, stroke: c.stroke, 'stroke-width': '2',
+      filter: 'drop-shadow(2px 3px 5px rgba(0,0,0,0.25))'
+    });
+
   } else {
     shape = svgEl('rect', { x, y, width: NW, height: NH, rx: 3,
       fill: c.fill, stroke: c.stroke, 'stroke-width': '2',
@@ -1232,13 +1359,15 @@ function buildNode(node) {
 
   // Step number badge
   if (node.type !== 'DECISION') {
-    g.appendChild(svgEl('rect', { x: x+2, y: y+2, width: 20, height: 16, rx: 3, fill: 'rgba(255,255,255,0.18)' }));
+    g.appendChild(svgEl('rect', { x: x+2, y: y+2, width: 20, height: 16, rx: 3, fill: 'rgba(255,255,255,0.18)', 'class': 'node-badge-bg' }));
     const bt = svgEl('text', { x: x+12, y: y+13, 'text-anchor': 'middle',
-      'font-size': '9', 'font-weight': '700', fill: '#fff', 'font-family': 'Courier New, monospace' });
+      'font-size': '9', 'font-weight': '700', fill: '#fff', 'font-family': 'Courier New, monospace',
+      'class': 'node-badge-text' });
     bt.textContent = node.step_id; g.appendChild(bt);
   } else {
     const bt = svgEl('text', { x: cx, y: cy-DIAMOND_HH+15, 'text-anchor': 'middle',
-      'font-size': '9', 'font-weight': '700', fill: c.text, 'font-family': 'Courier New, monospace' });
+      'font-size': '9', 'font-weight': '700', fill: c.text, 'font-family': 'Courier New, monospace',
+      'class': 'node-badge-text' });
     bt.textContent = node.step_id; g.appendChild(bt);
   }
 
@@ -1323,8 +1452,36 @@ function buildArrow(from, to, type, nodeMap) {
 
   let sx, sy, ex, ey, pathD;
 
-  if (!isNo) {
-    // YES: exit right side → enter left side of target
+  if (flowDir === 'vertical') {
+    // VERTICAL MODE: flow top→bottom
+    if (!isNo) {
+      // YES: exit bottom → enter top of target
+      sx = (from.type==='DECISION') ? nodeCX_V(fL) : nodeCX_V(fL);
+      sy = (from.type==='DECISION') ? nodeCY_V(fC)+DIAMOND_HH : nodeY_V(fC)+NH;
+      ex = nodeCX_V(tL);
+      ey = (to.type==='DECISION')   ? nodeCY_V(tC)-DIAMOND_HH : nodeY_V(tC);
+      if (Math.abs(sx - ex) < 2) {
+        pathD = `M ${sx} ${sy} L ${ex} ${ey}`;
+      } else {
+        const midY = sy + (ey - sy) / 2;
+        const r1 = Math.min(R, Math.abs(midY-sy)/2, Math.abs(ex-sx)/2);
+        const r2 = Math.min(R, Math.abs(ey-midY)/2, Math.abs(ex-sx)/2);
+        const dh = ex > sx ? 1 : -1;
+        pathD = [`M ${sx} ${sy}`,`L ${sx} ${midY-r1}`,`Q ${sx} ${midY} ${sx+dh*r1} ${midY}`,`L ${ex-dh*r2} ${midY}`,`Q ${ex} ${midY} ${ex} ${midY+r2}`,`L ${ex} ${ey}`].join(' ');
+      }
+    } else {
+      // NO: exit right or left side of diamond → enter top of target
+      const exitRight = tL > fL;
+      sx = exitRight ? nodeCX_V(fL) + DIAMOND_HW : nodeCX_V(fL) - DIAMOND_HW;
+      sy = nodeCY_V(fC);
+      ex = nodeCX_V(tL);
+      ey = nodeY_V(tC);
+      const r1 = Math.min(R, Math.abs(ex-sx)/2, Math.abs(ey-sy)/2);
+      const dh = ex > sx ? 1 : -1;
+      pathD = [`M ${sx} ${sy}`,`L ${ex-dh*r1} ${sy}`,`Q ${ex} ${sy} ${ex} ${sy+r1}`,`L ${ex} ${ey}`].join(' ');
+    }
+  } else if (!isNo) {
+    // HORIZONTAL YES: exit right side → enter left side of target
     sx = (from.type==='DECISION') ? nodeCX(fC)+DIAMOND_HW : nodeX(fC)+NW;
     sy = nodeCY(fL);
     ex = (to.type==='DECISION')   ? nodeCX(tC)-DIAMOND_HW : nodeX(tC);
@@ -1348,7 +1505,7 @@ function buildArrow(from, to, type, nodeMap) {
         `L ${ex} ${ey}`
       ].join(' ');
     }
-  } else {
+  } else if (flowDir !== 'vertical') { // HORIZONTAL NO:
     // NO: exit top tip (target above) or bottom tip (target below) →
     // direct L-shape: vertical to target lane centre Y → horizontal into target left side.
     // No U-turn outside lanes — just a clean two-segment orthogonal path.
@@ -1381,13 +1538,26 @@ function buildArrow(from, to, type, nodeMap) {
   // Yes / No label
   if (from.type === 'DECISION') {
     let lx, ly;
-    if (!isNo) {
-      lx = nodeCX(fC) + DIAMOND_HW + 16; ly = nodeCY(fL) - 8;
+    if (flowDir === 'vertical') {
+      if (!isNo) {
+        // YES: exits bottom — label below bottom tip
+        lx = nodeCX_V(fL) + 16;
+        ly = nodeCY_V(fC) + DIAMOND_HH + 14;
+      } else {
+        // NO: exits left or right side — label beside that tip
+        const exitRight = tL > fL;
+        lx = exitRight ? nodeCX_V(fL) + DIAMOND_HW + 16 : nodeCX_V(fL) - DIAMOND_HW - 16;
+        ly = nodeCY_V(fC) - 8;
+      }
     } else {
-      // Label near the tip the No arrow exits from
-      const exitTop = tL < fL;
-      lx = nodeCX(fC) + 16;
-      ly = exitTop ? nodeCY(fL) - DIAMOND_HH - 10 : nodeCY(fL) + DIAMOND_HH + 14;
+      if (!isNo) {
+        lx = nodeCX(fC) + DIAMOND_HW + 16; ly = nodeCY(fL) - 8;
+      } else {
+        // Label near the tip the No arrow exits from
+        const exitTop = tL < fL;
+        lx = nodeCX(fC) + 16;
+        ly = exitTop ? nodeCY(fL) - DIAMOND_HH - 10 : nodeCY(fL) + DIAMOND_HH + 14;
+      }
     }
     g.appendChild(svgEl('rect', { x:lx-14, y:ly-12, width:28, height:16, rx:3, fill:'white', opacity:'0.9' }));
     const lbl = svgEl('text', { x:lx, y:ly, 'text-anchor':'middle',
@@ -1418,21 +1588,15 @@ function buildArrow(from, to, type, nodeMap) {
 
 function scrollToNode(node) {
   const viewport = document.getElementById('flowchart-viewport');
-  const svg      = document.getElementById('flowchart-svg');
-  if (!viewport || !svg) return;
+  if (!viewport) return;
 
-  // SVG coordinate → pixel position inside the scrollable viewport
-  const vbW    = parseFloat(svg.getAttribute('width'))  || svg.getBoundingClientRect().width;
-  const vbH    = parseFloat(svg.getAttribute('height')) || svg.getBoundingClientRect().height;
-  const scaleX = vbW > 0 ? svg.getBoundingClientRect().width  / vbW : 1;
-  const scaleY = vbH > 0 ? svg.getBoundingClientRect().height / vbH : 1;
+  // SVG node center coordinates (lane-headers are outside viewport — no offset needed)
+  const cx = flowDir === 'vertical' ? nodeCX_V(node.lane)   : nodeCX(node.svgCol);
+  const cy = flowDir === 'vertical' ? nodeCY_V(node.svgCol) : nodeCY(node.lane);
 
-  // Node center in scroll-space = scrollLeft + (node px position relative to viewport left)
-  const svgLeft = svg.getBoundingClientRect().left - viewport.getBoundingClientRect().left + viewport.scrollLeft;
-  const svgTop  = svg.getBoundingClientRect().top  - viewport.getBoundingClientRect().top  + viewport.scrollTop;
-
-  const nodePxX = svgLeft + nodeCX(node.svgCol) * scaleX;
-  const nodePxY = svgTop  + nodeCY(node.lane)   * scaleY;
+  // Multiply by zoom to get pixel position inside the scrollable viewport
+  const nodePxX = cx * zoomLevel;
+  const nodePxY = cy * zoomLevel;
 
   viewport.scrollTo({
     left: nodePxX - viewport.clientWidth  / 2,
@@ -1600,7 +1764,45 @@ function revealPrev() {
     if (nodeEl) { nodeEl.style.opacity = '0'; nodeEl.classList.remove('anim-node-in', 'node-active'); }
     ['yes', 'no'].forEach(t => {
       const arrEl = document.getElementById(`arrow-${node.step_id}-${t}`);
-      if (arrEl) { arrEl.style.opacity = '0'; arrEl.classList.remove('anim-arrow-in'); }
+      if (arrEl) {
+        arrEl.style.opacity = '0';
+        arrEl.classList.remove('anim-arrow-in');
+        // Reset path dash so it redraws cleanly next time
+        const path = arrEl.querySelector('path');
+        if (path) { path.style.transition = 'none'; path.removeAttribute('stroke-dasharray'); path.removeAttribute('stroke-dashoffset'); }
+      }
+    });
+    // Remove permanent arrowhead tips for this node's arrows
+    document.querySelectorAll('.arrow-tip').forEach(tip => {
+      // Check if tip belongs to an arrow of the hidden node by proximity
+      // Simplest: remove ALL tips and let forward steps re-add them
+    });
+    // Re-render only the arrowheads that belong to still-visible steps
+    const svg = document.getElementById('flowchart-svg');
+    if (svg) {
+      svg.querySelectorAll('.arrow-tip').forEach(tip => tip.parentNode && tip.parentNode.removeChild(tip));
+    }
+    // Re-add tips for arrows that are still visible (steps 0..revealedCount-1)
+    revealOrder.slice(0, revealedCount).forEach(visNode => {
+      ['yes','no'].forEach(t => {
+        const el = document.getElementById(`arrow-${visNode.step_id}-${t}`);
+        if (!el || el.style.opacity === '0') return;
+        const p = el.querySelector('path');
+        if (!p) return;
+        const len = p.getTotalLength();
+        if (len < 1) return;
+        const p1 = p.getPointAtLength(len);
+        const p0 = p.getPointAtLength(Math.max(0, len - 10));
+        const angle = Math.atan2(p1.y - p0.y, p1.x - p0.x);
+        const size = 14, cos = Math.cos(angle), sin = Math.sin(angle);
+        const bx = p1.x - size*cos, by = p1.y - size*sin;
+        const ns2 = 'http://www.w3.org/2000/svg';
+        const poly = document.createElementNS(ns2, 'polygon');
+        poly.setAttribute('points', `${p1.x},${p1.y} ${bx+(size*0.45)*sin},${by-(size*0.45)*cos} ${bx-(size*0.45)*sin},${by+(size*0.45)*cos}`);
+        poly.setAttribute('fill', t === 'no' ? '#e05c2a' : '#6b7280');
+        poly.classList.add('arrow-tip');
+        if (svg) svg.appendChild(poly);
+      });
     });
   }
   // Re-highlight previous
@@ -1649,7 +1851,18 @@ function startPlay() {
   if (revealedCount >= revealOrder.length) resetAll();
   isPlaying = true;
   document.getElementById('playBtn').textContent = '⏸ Pause';
-  document.getElementById('playBtn').classList.replace('btn-primary', 'btn-ghost');
+  document.getElementById('playBtn').classList.remove('btn-primary', 'btn-ghost');
+  document.getElementById('playBtn').classList.add('btn-control');
+  document.getElementById('teach-controls').style.display = 'contents';
+  document.getElementById('exportPdfBtn').style.display  = 'none';
+  document.getElementById('exportPptxBtn').style.display = 'none';
+  document.getElementById('flowModeBtn').style.display = 'none';
+  document.getElementById('flowDirBtn').style.display = 'none';
+  document.getElementById('exitTeachBtn').style.display = '';
+  document.getElementById('nextBtn').disabled = true;
+  document.getElementById('resetBtn').style.display = 'none';
+  document.getElementById('prevBtn').style.display = 'none';
+  document.getElementById('nextBtn').style.display = 'none';
   sidebarHide();
   tick();
 }
@@ -1668,8 +1881,17 @@ function tick() {
 function stopPlay() {
   isPlaying = false;
   clearTimeout(playTimer);
-  document.getElementById('playBtn').textContent = '▶ Teach Mode';
-  document.getElementById('playBtn').classList.replace('btn-ghost', 'btn-primary');
+  document.getElementById('playBtn').textContent = '▶ Continue';
+  document.getElementById('playBtn').classList.remove('btn-ghost', 'btn-control');
+  document.getElementById('playBtn').classList.add('btn-primary');
+  // Keep teach-controls visible after Hold — user steps manually
+  document.getElementById('teach-controls').style.display = 'contents';
+  document.getElementById('nextBtn').disabled = false;
+  document.getElementById('exportPptxBtn').style.display = '';
+  document.getElementById('flowDirBtn').style.display = '';
+  document.getElementById('resetBtn').style.display = '';
+  document.getElementById('prevBtn').style.display = '';
+  document.getElementById('nextBtn').style.display = '';
   sidebarShow();
 }
 
@@ -1751,12 +1973,11 @@ function loadDemoJSON(data) {
   updateControls();
   showDetailPanel(null);
 
-  document.getElementById('topic-title').textContent = data.topic;
+  document.getElementById('topic-title').textContent = data.topic + ' Flowchart';
   document.getElementById('welcome-screen').style.display = 'none';
   document.getElementById('flowchart-screen').classList.add('visible');
 
-  // Auto-start Demo Mode after short delay
-  setTimeout(() => startFlowMode(), 800);
+
 }
 
 
@@ -1909,33 +2130,57 @@ function exportPDF() {
   const svgW = parseFloat(svg.getAttribute('width'))  || 800;
   const svgH = parseFloat(svg.getAttribute('height')) || 400;
 
-  // ── Inject lane headers as SVG elements ─────────────────────────────
+  // ── Inject lane headers as SVG elements (direction-aware) ───────────
   const PALETTE = ['#4a9e7f','#5a72c7','#b07d2e','#b05540','#7a5ab0','#3a8ab0','#b04880','#6a9e30'];
   const hdrGroup = document.createElementNS('http://www.w3.org/2000/svg','g');
   LANE_DEFS.forEach((lane, l) => {
     const col = PALETTE[l % PALETTE.length];
     const r=parseInt(col.slice(1,3),16), g=parseInt(col.slice(3,5),16), b=parseInt(col.slice(5,7),16);
     const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
-    rect.setAttribute('x',0); rect.setAttribute('y',l*LANE_H);
-    rect.setAttribute('width',HEADER_W); rect.setAttribute('height',LANE_H);
-    rect.setAttribute('fill',`rgba(${r},${g},${b},0.72)`);
-    hdrGroup.appendChild(rect);
-    if (l > 0) {
-      const ln = document.createElementNS('http://www.w3.org/2000/svg','line');
-      ln.setAttribute('x1',0); ln.setAttribute('y1',l*LANE_H);
-      ln.setAttribute('x2',HEADER_W); ln.setAttribute('y2',l*LANE_H);
-      ln.setAttribute('stroke','rgba(255,255,255,0.25)'); ln.setAttribute('stroke-width','1');
-      hdrGroup.appendChild(ln);
+    if (flowDir === 'vertical') {
+      // Top horizontal strip — one cell per column
+      rect.setAttribute('x', l*ROW_W); rect.setAttribute('y', 0);
+      rect.setAttribute('width', ROW_W); rect.setAttribute('height', HEADER_H);
+      rect.setAttribute('fill', `rgb(${r},${g},${b})`);
+      hdrGroup.appendChild(rect);
+      if (l > 0) {
+        const ln = document.createElementNS('http://www.w3.org/2000/svg','line');
+        ln.setAttribute('x1',l*ROW_W); ln.setAttribute('y1',0);
+        ln.setAttribute('x2',l*ROW_W); ln.setAttribute('y2',HEADER_H);
+        ln.setAttribute('stroke','rgba(255,255,255,0.25)'); ln.setAttribute('stroke-width','1');
+        hdrGroup.appendChild(ln);
+      }
+      const text = document.createElementNS('http://www.w3.org/2000/svg','text');
+      text.setAttribute('x', l*ROW_W + ROW_W/2); text.setAttribute('y', HEADER_H/2);
+      text.setAttribute('text-anchor','middle'); text.setAttribute('dominant-baseline','central');
+      text.setAttribute('font-size','11'); text.setAttribute('font-weight','600');
+      text.setAttribute('font-family','Segoe UI, Arial, sans-serif');
+      text.setAttribute('fill','rgba(255,255,255,0.92)');
+      text.textContent = lane.label.toUpperCase();
+      hdrGroup.appendChild(text);
+    } else {
+      // Left vertical strip — one cell per row
+      rect.setAttribute('x',0); rect.setAttribute('y',l*LANE_H);
+      rect.setAttribute('width',HEADER_W); rect.setAttribute('height',LANE_H);
+      rect.setAttribute('fill',`rgba(${r},${g},${b},0.72)`);
+      hdrGroup.appendChild(rect);
+      if (l > 0) {
+        const ln = document.createElementNS('http://www.w3.org/2000/svg','line');
+        ln.setAttribute('x1',0); ln.setAttribute('y1',l*LANE_H);
+        ln.setAttribute('x2',HEADER_W); ln.setAttribute('y2',l*LANE_H);
+        ln.setAttribute('stroke','rgba(255,255,255,0.25)'); ln.setAttribute('stroke-width','1');
+        hdrGroup.appendChild(ln);
+      }
+      const text = document.createElementNS('http://www.w3.org/2000/svg','text');
+      text.setAttribute('x',HEADER_W/2); text.setAttribute('y',l*LANE_H+LANE_H/2);
+      text.setAttribute('text-anchor','middle'); text.setAttribute('dominant-baseline','middle');
+      text.setAttribute('font-size','11'); text.setAttribute('font-weight','600');
+      text.setAttribute('font-family','Segoe UI, Arial, sans-serif');
+      text.setAttribute('fill','rgba(255,255,255,0.92)'); text.setAttribute('letter-spacing','1.5');
+      text.setAttribute('transform',`rotate(-90,${HEADER_W/2},${l*LANE_H+LANE_H/2})`);
+      text.textContent = lane.label.toUpperCase();
+      hdrGroup.appendChild(text);
     }
-    const text = document.createElementNS('http://www.w3.org/2000/svg','text');
-    text.setAttribute('x',HEADER_W/2); text.setAttribute('y',l*LANE_H+LANE_H/2);
-    text.setAttribute('text-anchor','middle'); text.setAttribute('dominant-baseline','middle');
-    text.setAttribute('font-size','11'); text.setAttribute('font-weight','600');
-    text.setAttribute('font-family','Segoe UI, Arial, sans-serif');
-    text.setAttribute('fill','rgba(255,255,255,0.92)'); text.setAttribute('letter-spacing','1.5');
-    text.setAttribute('transform',`rotate(-90,${HEADER_W/2},${l*LANE_H+LANE_H/2})`);
-    text.textContent = lane.label.toUpperCase();
-    hdrGroup.appendChild(text);
   });
   svgClone.insertBefore(hdrGroup, svgClone.firstChild);
   const SCALE = 1.4;
@@ -2047,6 +2292,8 @@ function exportPDF() {
    Runs independently of the step-by-step Auto Play mode.
 ═══════════════════════════════════════════════════════ */
 let flowModeActive   = false;
+let zoomLevel = 1.0;
+let flowDir = 'horizontal'; // 'horizontal' | 'vertical'
 let flowDotAnimators = []; // holds cancelAnimationFrame handles
 
 function startFlowMode() {
@@ -2059,14 +2306,19 @@ function startFlowMode() {
 
   flowModeActive = true;
   document.getElementById('flowModeBtn').classList.add('active');
-  document.getElementById('flowModeBtn').textContent = '◼ Stop Demo';
+  document.getElementById('flowModeBtn').textContent = '◼ Exit Demo';
+  document.getElementById('exportPdfBtn').style.display  = 'none';
+  document.getElementById('exportPptxBtn').style.display = 'none';
+  document.getElementById('playBtn').style.display = 'none';
+  document.getElementById('flowDirBtn').style.display = 'none';
+  sidebarHide();
+  document.getElementById('teach-controls').style.display = 'none';
 
   const svg = document.getElementById('flowchart-svg');
   const nodeMap = {};
   currentNodes.forEach(n => nodeMap[n.step_id] = n);
 
-  const DOT_SPEED  = 180;
-  const NODE_PAUSE = 180;
+  // Speed read live inside travel() so slider changes take effect immediately
   let   activeDots = new Set();
   // Map<convergenceNodeId, { dot, onMerge }> — holds the dot waiting at convergence
   let   waiters    = new Map();
@@ -2094,7 +2346,10 @@ function startFlowMode() {
 
   function travel(dot, path, isNo, onArrive) {
     const len = path.getTotalLength();
-    const dur = (len / DOT_SPEED) * 1000;
+    const _sp = parseInt(document.getElementById('speedSlider').value) || 3;
+    const _dotSpeed = { 1: 25, 2: 70, 3: 200, 4: 500, 5: 1200 }[_sp] || 200;
+    const _pause    = { 1: 600, 2: 350, 3: 150, 4: 60, 5: 10 }[_sp] || 150;
+    const dur = (len / _dotSpeed) * 1000;
     const t0  = performance.now();
     dot.setAttribute('fill', isNo ? '#e05c2a' : '#4f6ef7');
 
@@ -2116,12 +2371,18 @@ function startFlowMode() {
           const cy = pt.y * scaleY;
           const targetLeft = cx - vp.clientWidth  / 2;
           const targetTop  = cy - vp.clientHeight / 2;
-          vp.scrollLeft += (targetLeft - vp.scrollLeft) * 0.05;
-          vp.scrollTop  += (targetTop  - vp.scrollTop)  * 0.05;
+          if (flowDir === 'vertical') {
+            // Vertical mode: follow dot vertically, center horizontally
+            vp.scrollTop  += (targetTop  - vp.scrollTop)  * 0.05;
+            vp.scrollLeft += (targetLeft - vp.scrollLeft) * 0.05;
+          } else {
+            vp.scrollLeft += (targetLeft - vp.scrollLeft) * 0.05;
+            vp.scrollTop  += (targetTop  - vp.scrollTop)  * 0.05;
+          }
         }
       }
       if (t < 1) { flowDotAnimators.push(requestAnimationFrame(frame)); return; }
-      setTimeout(() => { if (flowModeActive) onArrive(dot); }, NODE_PAUSE);
+      setTimeout(() => { if (flowModeActive) onArrive(dot); }, _pause);
     }
     flowDotAnimators.push(requestAnimationFrame(frame));
   }
@@ -2283,7 +2544,9 @@ function startFlowMode() {
     tspans.forEach(t => { fullText += t.textContent; });
 
     // ── Animation phases ──────────────────────────────────────────────────
-    const drawDur  = 2400, holdDur = 100, typeDur = 800, fadeDur = 400;
+    const _spf = parseInt(document.getElementById('speedSlider').value) || 3;
+    const drawDur  = { 1: 4000, 2: 3000, 3: 2400, 4: 1200, 5: 400 }[_spf] || 2400;
+    const holdDur = 100, fadeBadgeDur = 300, typeDur = Math.min(800, drawDur/3), fadeDur = 300;
     const t0 = performance.now();
     let completed = false;
 
@@ -2299,20 +2562,38 @@ function startFlowMode() {
         flowDotAnimators.push(requestAnimationFrame(animate));
 
       } else if (elapsed < drawDur + holdDur) {
-        // Phase 2: brief hold — clear text and start typing
+        // Phase 2: brief hold — complete border draw
         maskStroke.setAttribute('stroke-dashoffset', 0);
-        if (labelEl && !animate._textCleared) {
+        flowDotAnimators.push(requestAnimationFrame(animate));
+
+      } else if (elapsed < drawDur + holdDur + fadeBadgeDur) {
+        // Phase 3: badge fades OUT
+        const fp = (elapsed - drawDur - holdDur) / fadeBadgeDur;
+        const badgeText = grp.querySelector('.node-badge-text');
+        const badgeBg   = grp.querySelector('.node-badge-bg');
+        if (badgeText) badgeText.setAttribute('opacity', 1 - fp);
+        if (badgeBg)   badgeBg.setAttribute('opacity',   1 - fp);
+        flowDotAnimators.push(requestAnimationFrame(animate));
+
+      } else if (elapsed < drawDur + holdDur + fadeBadgeDur + fadeBadgeDur) {
+        // Phase 4: badge fades IN — clear text at very start of this phase
+        const fp = (elapsed - drawDur - holdDur - fadeBadgeDur) / fadeBadgeDur;
+        const badgeText = grp.querySelector('.node-badge-text');
+        const badgeBg   = grp.querySelector('.node-badge-bg');
+        if (badgeText) badgeText.setAttribute('opacity', fp);
+        if (badgeBg)   badgeBg.setAttribute('opacity',   fp);
+        // Clear label text at the very start of fade-in
+        if (!animate._textCleared) {
           animate._textCleared = true;
-          tspans.forEach(t => { t.textContent = ''; });
+          if (labelEl) tspans.forEach(t => { t.textContent = ''; });
         }
         flowDotAnimators.push(requestAnimationFrame(animate));
 
-      } else if (elapsed < drawDur + holdDur + typeDur) {
-        // Phase 3: retype text character by character
-        const tp = (elapsed - drawDur - holdDur) / typeDur;
+      } else if (elapsed < drawDur + holdDur + fadeBadgeDur + fadeBadgeDur + typeDur) {
+        // Phase 5: retype text character by character
+        const tp = (elapsed - drawDur - holdDur - fadeBadgeDur - fadeBadgeDur) / typeDur;
         const totalChars = fullText.length;
         const charsToShow = Math.floor(tp * totalChars);
-        // Distribute chars back across tspans
         let remaining = charsToShow;
         tspans.forEach((t, i) => {
           const orig = origTexts[i];
@@ -2322,14 +2603,14 @@ function startFlowMode() {
         });
         if (!completed && tp >= 1) {
           completed = true;
-          tspans.forEach((t, i) => { t.textContent = origTexts[i]; }); // restore fully
+          tspans.forEach((t, i) => { t.textContent = origTexts[i]; });
           if (onComplete) onComplete();
         }
         flowDotAnimators.push(requestAnimationFrame(animate));
 
-      } else if (elapsed < drawDur + holdDur + typeDur + fadeDur) {
-        // Phase 4: fade out dashed border
-        const p = (elapsed - drawDur - holdDur - typeDur) / fadeDur;
+      } else if (elapsed < drawDur + holdDur + fadeBadgeDur + fadeBadgeDur + typeDur + fadeDur) {
+        // Phase 6: fade out dashed border
+        const p = (elapsed - drawDur - holdDur - fadeBadgeDur - fadeBadgeDur - typeDur) / fadeDur;
         dashedBorder.setAttribute('opacity', 1 - p);
         flowDotAnimators.push(requestAnimationFrame(animate));
 
@@ -2342,8 +2623,12 @@ function startFlowMode() {
     function cleanup() {
       if (dashedBorder.parentNode) dashedBorder.parentNode.removeChild(dashedBorder);
       if (maskEl.parentNode)       maskEl.parentNode.removeChild(maskEl);
-      // Ensure text is fully restored
+      // Ensure text and badge are fully restored
       tspans.forEach((t, i) => { t.textContent = origTexts[i]; });
+      const badgeText2 = grp.querySelector('.node-badge-text');
+      const badgeBg2   = grp.querySelector('.node-badge-bg');
+      if (badgeText2) badgeText2.setAttribute('opacity', '1');
+      if (badgeBg2)   badgeBg2.setAttribute('opacity', '1');
       if (!completed) { completed = true; if (onComplete) onComplete(); }
     }
   }
@@ -2368,19 +2653,424 @@ function stopFlowMode() {
   document.querySelectorAll('.flow-dot').forEach(d => d.parentNode && d.parentNode.removeChild(d));
   document.getElementById('flowModeBtn').classList.remove('active');
   document.getElementById('flowModeBtn').textContent = '⬤ Demo Mode';
+  sidebarShow();
+  document.getElementById('exportPdfBtn').style.display = '';
+  document.getElementById('playBtn').style.display = '';
+  document.getElementById('playBtn').textContent = '▶ Teach Mode';
+  document.getElementById('flowDirBtn').style.display = '';
+  document.getElementById('playBtn').classList.remove('btn-ghost');
+  document.getElementById('playBtn').classList.add('btn-primary');
+  document.getElementById('teach-controls').style.display = 'none';
+  document.getElementById('exitTeachBtn').style.display = 'none';
+}
+
+/* ═══════════════════════════════════════════════════════
+   FLOW DIRECTION TOGGLE
+═══════════════════════════════════════════════════════ */
+function toggleFlowDir() {
+  flowDir = flowDir === 'horizontal' ? 'vertical' : 'horizontal';
+  const btn = document.getElementById('flowDirBtn');
+  if (btn) btn.textContent = flowDir === 'horizontal' ? '⇄ Horizontal' : '⇅ Vertical';
+  if (!currentNodes.length) return;
+
+  // Snapshot visible button states before stopping modes
+  const snap = {
+    playDisplay:      $id('playBtn').style.display,
+    playText:         $id('playBtn').textContent,
+    flowModeDisplay:  $id('flowModeBtn').style.display,
+    exportDisplay:    $id('exportPdfBtn').style.display,
+    teachDisplay:     $id('teach-controls').style.display,
+    exitTeachDisplay: $id('exitTeachBtn').style.display,
+  };
+
+  // Stop modes silently (just cancel animations, don't touch UI)
+  flowModeActive = false;
+  flowDotAnimators.forEach(id => cancelAnimationFrame(id));
+  flowDotAnimators = [];
+  document.querySelectorAll('.flow-dot').forEach(d => d.parentNode && d.parentNode.removeChild(d));
+  isPlaying = false;
+  clearTimeout(playTimer);
+
+  buildLaneDefs(currentNodes.map(n => ({ role: n.role })));
+  currentNodes = buildLayout(currentNodes.map(n => ({
+    step_id: n.step_id, name: n.name, desc: n.desc, role: n.role,
+    type: n.type, next_yes: n.next_yes, next_no: n.next_no,
+    notes: n.notes, link: n.link
+  })));
+  revealOrder   = buildRevealOrder(currentNodes);
+  revealedCount = 0;
+  renderFlowchart(currentNodes);
+  updateProgress(); updateControls(); showDetailPanel(null);
+
+  // Restore button states
+  $id('playBtn').style.display      = snap.playDisplay;
+  $id('playBtn').textContent        = snap.playText;
+  $id('flowModeBtn').style.display  = snap.flowModeDisplay;
+  $id('exportPdfBtn').style.display = snap.exportDisplay;
+  $id('teach-controls').style.display = snap.teachDisplay;
+  $id('exitTeachBtn').style.display = snap.exitTeachDisplay;
+}
+
+/* ═══════════════════════════════════════════════════════
+   ZOOM
+═══════════════════════════════════════════════════════ */
+function applyZoom() {
+  const container = document.getElementById('zoom-container');
+  const headers   = document.getElementById('lane-headers');
+  const svg       = document.getElementById('flowchart-svg');
+  const lbl       = document.getElementById('zoomLabel');
+  const svgW = parseFloat(svg ? svg.getAttribute('width')  : 0) || 0;
+  const svgH = parseFloat(svg ? svg.getAttribute('height') : 0) || 0;
+
+  if (container) {
+    container.style.transform    = `scale(${zoomLevel})`;
+    container.style.transformOrigin = 'top left';
+    container.style.width        = svgW + 'px';
+    container.style.height       = svgH + 'px';
+    container.style.marginRight  = (svgW * zoomLevel - svgW) + 'px';
+    container.style.marginBottom = (svgH * zoomLevel - svgH) + 'px';
+  }
+
+  // Scale headers to match zoomed SVG
+  if (flowDir === 'vertical') {
+    const hv = document.getElementById('lane-headers-v');
+    if (hv) {
+      hv.style.transform       = `scaleX(${zoomLevel})`;
+      hv.style.transformOrigin = 'top left';
+    }
+  } else {
+    if (headers) {
+      headers.style.transform       = `scaleY(${zoomLevel})`;
+      headers.style.transformOrigin = 'top left';
+      headers.style.width           = HEADER_W + 'px';
+      headers.style.height          = svgH + 'px';
+    }
+  }
+
+  if (lbl) lbl.textContent = Math.round(zoomLevel * 100) + '%';
+  syncHeaderScroll();
+}
+
+function syncHeaderScroll() {
+  // Vertical mode: lane-headers-v is inside viewport with position:sticky — auto syncs
+  // Horizontal mode: sync scrollTop of left strip to viewport
+  if (flowDir === 'vertical') return;
+  const vp      = document.getElementById('flowchart-viewport');
+  const headers = document.getElementById('lane-headers');
+  if (!vp || !headers) return;
+  headers.scrollTop = vp.scrollTop / zoomLevel;
+}
+
+function zoomIn()  { zoomLevel = Math.min(3.0, parseFloat((zoomLevel + 0.1).toFixed(1))); applyZoom(); }
+function zoomOut() { zoomLevel = Math.max(0.3, parseFloat((zoomLevel - 0.1).toFixed(1))); applyZoom(); }
+function zoomReset() { zoomLevel = 1.0; applyZoom(); }
+
+// Mouse wheel zoom on viewport
+document.getElementById('flowchart-viewport').addEventListener('scroll', syncHeaderScroll);
+document.getElementById('flowchart-viewport').addEventListener('wheel', e => {
+  if (!e.ctrlKey && !e.metaKey) return; // only zoom on Ctrl+scroll
+  e.preventDefault();
+  if (e.deltaY < 0) zoomIn(); else zoomOut();
+}, { passive: false });
+
+/* ═══════════════════════════════════════════════════════
+   EXPORT AS POWERPOINT  — editable shapes via PptxGenJS
+═══════════════════════════════════════════════════════ */
+function exportPPTX() {
+  if (!currentNodes.length) { alert('Please load a flowchart first.'); return; }
+  const topicTitle = (document.getElementById('topic-title').textContent || 'Flowchart');
+
+  // Load PptxGenJS from CDN on first use
+  function loadPptxGenJS(cb) {
+    if (window.PptxGenJS) { cb(); return; }
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js';
+    s.onload = cb;
+    s.onerror = () => alert('Could not load PptxGenJS. Check your internet connection.');
+    document.head.appendChild(s);
+  }
+
+  loadPptxGenJS(() => {
+    const svg   = document.getElementById('flowchart-svg');
+    const svgW  = parseFloat(svg.getAttribute('width'))  || 800;
+    const svgH  = parseFloat(svg.getAttribute('height')) || 400;
+
+    // Slide dimensions: Wide layout 13.33" x 7.5"
+    // Add 1" left for lane header strip (horizontal) or 0.5" top (vertical)
+    const SLIDE_W = 13.33, SLIDE_H = 7.5;
+    const HDR_IN  = flowDir === 'vertical' ? 0.4 : 0.4; // header strip inches
+
+    // Scale SVG coords → slide inches
+    // For horizontal: SVG x starts at HEADER_W offset; need to account for that
+    const scaleX = (SLIDE_W - HDR_IN) / (svgW - (flowDir === 'horizontal' ? HEADER_W : 0));
+    const scaleY = (SLIDE_H - (flowDir === 'vertical' ? HDR_IN : 0)) / (svgH - (flowDir === 'vertical' ? HEADER_H : 0));
+    const scale  = Math.min(scaleX, scaleY); // uniform scale
+
+    function svgX(px) {
+      const base = flowDir === 'horizontal' ? px - HEADER_W : px;
+      return HDR_IN + base * scale;
+    }
+    function svgY(py) {
+      const base = flowDir === 'vertical' ? py - HEADER_H : py;
+      return (flowDir === 'vertical' ? HDR_IN : 0) + base * scale;
+    }
+    function svgS(px) { return px * scale; } // size scalar
+
+    const PALETTE = ['4a9e7f','5a72c7','b07d2e','b05540','7a5ab0','3a8ab0','b04880','6a9e30'];
+
+    const pres = new PptxGenJS();
+    pres.layout = 'LAYOUT_WIDE';
+    pres.title  = topicTitle;
+    const slide = pres.addSlide();
+    slide.background = { color: '13151f' };
+
+    // ── Lane backgrounds ──────────────────────────────────────────────
+    LANE_DEFS.forEach((lane, l) => {
+      const col = PALETTE[l % PALETTE.length];
+      const alpha = flowDir === 'vertical' ? 100 : 72;
+      if (flowDir === 'vertical') {
+        const lx = svgX(laneLeft(l));
+        slide.addShape(pres.shapes.RECTANGLE, {
+          x: lx, y: HDR_IN, w: svgS(ROW_W), h: SLIDE_H - HDR_IN,
+          fill: { color: col, transparency: 30 }, line: { color: col, width: 0 }
+        });
+        // Vertical divider
+        if (l > 0) {
+          slide.addShape(pres.shapes.LINE, {
+            x: lx, y: HDR_IN, w: 0, h: SLIDE_H - HDR_IN,
+            line: { color: 'ffffff', width: 0.5, dashType: 'dash', transparency: 60 }
+          });
+        }
+        // Header cell
+        slide.addShape(pres.shapes.RECTANGLE, {
+          x: lx, y: 0, w: svgS(ROW_W), h: HDR_IN,
+          fill: { color: col }, line: { color: col, width: 0 }
+        });
+        slide.addText(lane.label.toUpperCase(), {
+          x: lx, y: 0, w: svgS(ROW_W), h: HDR_IN,
+          fontSize: 9, bold: true, color: 'ffffff', align: 'center', valign: 'middle',
+          fontFace: 'Segoe UI', charSpacing: 1
+        });
+      } else {
+        const ly = svgY(laneTop(l));
+        slide.addShape(pres.shapes.RECTANGLE, {
+          x: HDR_IN, y: ly, w: SLIDE_W - HDR_IN, h: svgS(LANE_H),
+          fill: { color: col, transparency: 70 }, line: { color: col, width: 0 }
+        });
+        if (l > 0) {
+          slide.addShape(pres.shapes.LINE, {
+            x: HDR_IN, y: ly, w: SLIDE_W - HDR_IN, h: 0,
+            line: { color: 'ffffff', width: 0.5, dashType: 'dash', transparency: 60 }
+          });
+        }
+        // Header cell (left strip)
+        slide.addShape(pres.shapes.RECTANGLE, {
+          x: 0, y: ly, w: HDR_IN, h: svgS(LANE_H),
+          fill: { color: col, transparency: 28 }, line: { color: col, width: 0 }
+        });
+        slide.addText(lane.label.toUpperCase(), {
+          x: 0, y: ly, w: HDR_IN, h: svgS(LANE_H),
+          fontSize: 8, bold: true, color: 'ffffff', align: 'center', valign: 'middle',
+          fontFace: 'Segoe UI', rotate: 270, charSpacing: 1
+        });
+      }
+    });
+
+    // ── Arrows ────────────────────────────────────────────────────────
+    const nodeMap = {};
+    currentNodes.forEach(n => nodeMap[n.step_id] = n);
+    currentNodes.forEach(node => {
+      ['yes','no'].forEach(t => {
+        const arrEl = document.getElementById(`arrow-${node.step_id}-${t}`);
+        if (!arrEl) return;
+        const path = arrEl.querySelector('path');
+        if (!path) return;
+        const isNo = t === 'no';
+        const len  = path.getTotalLength();
+        if (len < 1) return;
+        // Sample points along path for segmented line
+        const STEPS = 20;
+        const pts = [];
+        for (let i = 0; i <= STEPS; i++) {
+          const pt = path.getPointAtLength((i/STEPS)*len);
+          pts.push({ x: svgX(pt.x), y: svgY(pt.y) });
+        }
+        // Draw as sequence of small line segments
+        for (let i = 0; i < pts.length - 1; i++) {
+          const dx = pts[i+1].x - pts[i].x;
+          const dy = pts[i+1].y - pts[i].y;
+          const segLen = Math.sqrt(dx*dx + dy*dy);
+          if (segLen < 0.001) continue;
+          slide.addShape(pres.shapes.LINE, {
+            x: pts[i].x, y: pts[i].y,
+            w: dx, h: dy,
+            line: {
+              color: isNo ? 'e05c2a' : '6b7280',
+              width: 1,
+              dashType: isNo ? 'dash' : 'solid'
+            }
+          });
+        }
+        // Arrowhead at end
+        const p1 = path.getPointAtLength(len);
+        const p0 = path.getPointAtLength(Math.max(0, len - 8));
+        const angle = Math.atan2(p1.y - p0.y, p1.x - p0.x) * 180 / Math.PI;
+        slide.addShape(pres.shapes.TRIANGLE, {
+          x: svgX(p1.x) - svgS(7), y: svgY(p1.y) - svgS(5),
+          w: svgS(10), h: svgS(8),
+          fill: { color: isNo ? 'e05c2a' : '6b7280' },
+          line: { color: isNo ? 'e05c2a' : '6b7280', width: 0 },
+          rotate: angle + 90
+        });
+      });
+    });
+
+    // ── Nodes ─────────────────────────────────────────────────────────
+    currentNodes.forEach(node => {
+      const c   = NODE_COLORS[node.type] || NODE_COLORS.PROCESS;
+      const x   = flowDir === 'vertical' ? nodeX_V(node.lane)   : nodeX(node.svgCol);
+      const y   = flowDir === 'vertical' ? nodeY_V(node.svgCol) : nodeY(node.lane);
+      const cx  = flowDir === 'vertical' ? nodeCX_V(node.lane)  : nodeCX(node.svgCol);
+      const cy  = flowDir === 'vertical' ? nodeCY_V(node.svgCol): nodeCY(node.lane);
+      const col = c.fill.replace('#','');
+      const sx  = svgX(x), sy = svgY(y);
+      const sw  = svgS(NW), sh = svgS(NH);
+
+      let shapeType;
+      if (node.type === 'START' || node.type === 'END') {
+        shapeType = pres.shapes.ROUNDED_RECTANGLE;
+      } else if (node.type === 'DECISION') {
+        shapeType = pres.shapes.DIAMOND;
+      } else if (node.type === 'PREPARATION') {
+        shapeType = pres.shapes.HEXAGON;
+      } else if (node.type === 'DATAINPUT') {
+        shapeType = pres.shapes.PARALLELOGRAM;
+      } else {
+        shapeType = pres.shapes.RECTANGLE;
+      }
+
+      const nodeX2 = node.type === 'DECISION' ? svgX(cx - DIAMOND_HW) : sx;
+      const nodeY2 = node.type === 'DECISION' ? svgY(cy - DIAMOND_HH) : sy;
+      const nodeW  = node.type === 'DECISION' ? svgS(DIAMOND_HW*2)    : sw;
+      const nodeH  = node.type === 'DECISION' ? svgS(DIAMOND_HH*2)    : sh;
+
+      slide.addShape(shapeType, {
+        x: nodeX2, y: nodeY2, w: nodeW, h: nodeH,
+        fill: { color: col },
+        line: { color: c.stroke.replace('#',''), width: 1.5 },
+        shadow: { type: 'outer', color: '000000', blur: 5, offset: 2, angle: 135, opacity: 0.25 }
+      });
+
+      // Step number badge
+      if (node.type !== 'DECISION') {
+        slide.addShape(pres.shapes.RECTANGLE, {
+          x: sx, y: sy, w: svgS(20), h: svgS(16),
+          fill: { color: 'ffffff', transparency: 82 },
+          line: { color: 'ffffff', width: 0, transparency: 100 }
+        });
+        slide.addText(String(node.step_id), {
+          x: sx, y: sy, w: svgS(20), h: svgS(16),
+          fontSize: 6, bold: true, color: 'ffffff', align: 'center', valign: 'middle',
+          fontFace: 'Courier New'
+        });
+      } else {
+        slide.addText(String(node.step_id), {
+          x: nodeX2, y: nodeY2, w: nodeW, h: svgS(16),
+          fontSize: 6, bold: true, color: c.text.replace('#',''), align: 'center', valign: 'top',
+          fontFace: 'Courier New'
+        });
+      }
+
+      // Node label
+      slide.addText(node.name, {
+        x: nodeX2, y: nodeY2, w: nodeW, h: nodeH,
+        fontSize: 7, bold: true, color: c.text.replace('#',''),
+        align: 'center', valign: 'middle',
+        fontFace: 'Segoe UI', wrap: true
+      });
+    });
+
+    // Download
+    pres.writeFile({ fileName: `${topicTitle.replace(/[^a-zA-Z0-9_-]/g,'_')}.pptx` });
+  });
 }
 
 /* ═══════════════════════════════════════════════════════
    BUTTON WIRING
 ═══════════════════════════════════════════════════════ */
-document.getElementById('nextBtn').addEventListener('click', () => { stopPlay(); revealNext(); });
-document.getElementById('prevBtn').addEventListener('click', () => { stopPlay(); revealPrev(); });
-document.getElementById('resetBtn').addEventListener('click', resetAll);
-document.getElementById('pdf-modal-close').addEventListener('click', closePdfModal);
-document.getElementById('exportPdfBtn').addEventListener('click', exportPDF);
-document.getElementById('flowModeBtn').addEventListener('click', startFlowMode);
-document.getElementById('playBtn').addEventListener('click', () => {
-  if (isPlaying) stopPlay(); else startPlay();
+function $id(id) { return document.getElementById(id); }
+function $wire(id, fn) { const el = $id(id); if (el) el.addEventListener('click', fn); }
+
+$wire('nextBtn',       () => { $id('teach-controls').style.display='contents'; stopPlay(); revealNext(); });
+$wire('prevBtn',       () => { $id('teach-controls').style.display='contents'; stopPlay(); revealPrev(); });
+$wire('resetBtn', () => {
+  const inTeach = $id('exitTeachBtn').style.display !== 'none' ||
+                  $id('teach-controls').style.display !== 'none';
+  resetAll();
+  if (inTeach) {
+    // Stay in teach context — keep exportPdf + demoMode hidden
+    $id('exportPdfBtn').style.display = 'none';
+    $id('flowModeBtn').style.display  = 'none';
+    $id('exitTeachBtn').style.display = '';
+    $id('teach-controls').style.display = 'contents';
+    $id('playBtn').textContent = '▶ Auto Play';
+    $id('playBtn').classList.remove('btn-ghost', 'btn-control');
+    $id('playBtn').classList.add('btn-primary');
+  }
+});
+$wire('pdf-modal-close', closePdfModal);
+$wire('exportPdfBtn',  exportPDF);
+$wire('exportPptxBtn', exportPPTX);
+$wire('exitTeachBtn', () => {
+  stopPlay();
+  revealedCount = 0;
+  document.querySelectorAll('.arrow-tip').forEach(el => el.parentNode && el.parentNode.removeChild(el));
+  renderFlowchart(currentNodes);
+  const vp = document.getElementById('flowchart-viewport');
+  if (vp) vp.scrollTo({ left:0, top:0, behavior:'smooth' });
+  showDetailPanel(null); updateProgress(); updateControls();
+  // Restore full idle state
+  document.getElementById('exitTeachBtn').style.display = 'none';
+  document.getElementById('teach-controls').style.display = 'none';
+  document.getElementById('playBtn').textContent = '▶ Teach Mode';
+  document.getElementById('playBtn').classList.remove('btn-ghost');
+  document.getElementById('playBtn').classList.add('btn-primary');
+  document.getElementById('flowModeBtn').style.display = '';
+  document.getElementById('flowDirBtn').style.display = '';
+  document.getElementById('exportPdfBtn').style.display  = '';
+  document.getElementById('exportPptxBtn').style.display = '';
+  document.getElementById('nextBtn').disabled = false;
+  sidebarShow();
+});
+$wire('flowModeBtn', startFlowMode);
+$wire('zoomInBtn',   zoomIn);
+$wire('flowDirBtn',  toggleFlowDir);
+$wire('zoomOutBtn',  zoomOut);
+$wire('zoomLabel',   zoomReset);
+$wire('playBtn', () => {
+  const btn = $id('playBtn');
+  const label = btn ? btn.textContent.trim() : '';
+  if (isPlaying) {
+    // Auto-playing → Pause
+    stopPlay();
+  } else if (label === '▶ Auto Play' || label === '▶ Continue') {
+    // Auto Play or Continue clicked → start/resume auto-play
+    startPlay();
+  } else {
+    // "▶ Teach Mode" clicked → enter manual mode first
+    $id('teach-controls').style.display = 'contents';
+    $id('resetBtn').style.display = '';
+    $id('prevBtn').style.display = '';
+    $id('nextBtn').style.display = '';
+    $id('exitTeachBtn').style.display = '';
+    $id('exportPdfBtn').style.display = 'none';
+    $id('flowModeBtn').style.display = 'none';
+    $id('flowDirBtn').style.display = 'none';
+    btn.textContent = '▶ Auto Play';
+    btn.classList.remove('btn-ghost', 'btn-control');
+    btn.classList.add('btn-primary');
+    sidebarHide();
+  }
 });
 
 /* ─── Keyboard shortcuts ───────── */
@@ -2428,6 +3118,9 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); stopPlay(); revealNext(); }
   if (e.key === 'ArrowLeft') { e.preventDefault(); stopPlay(); revealPrev(); }
   if (e.key === 'r' || e.key === 'R') resetAll();
+  if (e.key === '=' || e.key === '+') zoomIn();
+  if (e.key === '-' || e.key === '_') zoomOut();
+  if (e.key === '0') zoomReset();
   if (e.key === 'p' || e.key === 'P') { if (isPlaying) stopPlay(); else startPlay(); }
 });
 
