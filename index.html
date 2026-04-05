@@ -469,7 +469,6 @@ const XLSX = (function () {
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    z-index: 10;
     overflow: hidden;
     align-self: stretch;
   }
@@ -493,6 +492,8 @@ const XLSX = (function () {
     padding: 0;
     cursor: grab;
     user-select: none;
+    position: relative;
+    z-index: 1;
   }
   #flowchart-viewport.dragging { cursor: grabbing; }
   #zoom-container { transition: transform 0.15s ease; display: inline-flex; vertical-align: top; }
@@ -1828,7 +1829,6 @@ function stopPlay() {
   // Keep teach-controls visible after Hold — user steps manually
   document.getElementById('teach-controls').style.display = 'contents';
   document.getElementById('nextBtn').disabled = false;
-  document.getElementById('exportPngBtn').style.display = '';
   document.getElementById('flowDirBtn').style.display = '';
   document.getElementById('resetBtn').style.display = '';
   document.getElementById('prevBtn').style.display = '';
@@ -2595,6 +2595,7 @@ function stopFlowMode() {
   document.getElementById('flowModeBtn').textContent = '⬤ Demo Mode';
   sidebarShow();
   document.getElementById('exportPdfBtn').style.display = '';
+  document.getElementById('exportPngBtn').style.display = '';
   document.getElementById('playBtn').style.display = '';
   document.getElementById('playBtn').textContent = '▶ Teach Mode';
   document.getElementById('flowDirBtn').style.display = '';
@@ -2900,6 +2901,7 @@ $wire('playBtn', () => {
     $id('nextBtn').style.display = '';
     $id('exitTeachBtn').style.display = '';
     $id('exportPdfBtn').style.display = 'none';
+    $id('exportPngBtn').style.display = 'none';
     $id('flowModeBtn').style.display = 'none';
     $id('flowDirBtn').style.display = 'none';
     btn.textContent = '▶ Auto Play';
