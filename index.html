@@ -2683,7 +2683,9 @@ function applyZoom() {
       headers.style.transform       = `scaleY(${zoomLevel})`;
       headers.style.transformOrigin = 'top left';
       headers.style.width           = HEADER_W + 'px';
-      headers.style.height          = svgH + 'px';
+      // Do NOT set height here — let flexbox constrain it to the viewport height.
+      // The cells inside total svgH, so scrollTop can sync with viewport.scrollTop
+      headers.style.height          = '';
     }
   }
 
